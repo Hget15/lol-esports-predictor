@@ -9,6 +9,12 @@ random forest, a small MLP, and a stacking ensemble) is implemented by hand in
 Trained on **51,088 games** from [Oracle's Elixir](https://oracleselixir.com) (2021–2026),
 the final model reaches **AUC 0.797 / 72.1% accuracy** on a held-out, time-ordered test set.
 
+More than a modelling exercise, this is an attempt to answer a **game-design question with data**:
+*when two pro teams sit down, what actually decides the result?* The answer the model keeps
+returning is not raw team strength — it's **how quickly a team adapts to the current patch.**
+
+![What actually decides pro LoL matches — top V4 features](results/charts/v4_feature_importance.png)
+
 > Constraint that shaped the project: the build environment had no internet package access
 > (a proxy blocked `pip`), so every model had to be written from first principles in NumPy.
 > That turned into the most interesting part of the work.
@@ -68,6 +74,8 @@ Final V4 model comparison on the held-out test set (`results/model_comparison.cs
 
 Progression across versions (best model each generation, identical test split):
 
+![Accuracy by version, V1 to V4](results/charts/v4_model_progression.png)
+
 | Version | Best model | AUC | Brier | Accuracy | Features |
 |---------|------------|:---:|:-----:|:--------:|:--------:|
 | V1 | LR | 0.688 | 0.223 | 63.5% | 63 |
@@ -101,6 +109,33 @@ Progression across versions (best model each generation, identical test split):
   ~10 matched games) the edge disappears into noise — best-of series between evenly matched
   elite teams are inherently low-signal, and no 51k-game model fixes a 10-game sample. See
   `worklog.md` for the full write-up.
+
+---
+
+## What this says about League — a designer's lens
+
+I built this as a designer who wanted to *interrogate the game's systems with data*, not just
+chase an accuracy number. A few takeaways I find genuinely interesting for how competitive
+League is designed:
+
+- **The meta is a skill, not a backdrop.** The single most predictive signal — by a wide margin
+  — is how well a team is performing *on the current patch relative to its own recent form*
+  (25% of model importance, more than 3× the next feature). Patch churn isn't noise the best
+  teams ride out; **adapting to it faster is the competitive edge.** That reframes patch cadence
+  as a core design lever on competitive integrity, not just a balance-maintenance chore.
+- **Flexibility beats mastery, a little.** Champion-pool depth and meta-conformity features
+  carry real weight, while single-champion "comfort" carries less. The systems reward teams
+  that can move *with* the meta over one-tricks — a design outcome most balance teams want.
+- **The early game still writes the story.** Gold- and CS-differential-at-15 features remain
+  predictive across every version, a quiet vote of confidence in lane-phase design: the first
+  15 minutes still meaningfully shape outcomes even at the pro level.
+- **Parity at the very top is real — and probably healthy.** When I stress-tested the model on
+  a single elite tournament's finals, its edge collapsed toward a coin flip. Between the best
+  teams on a settled patch, the game is close to a toss-up — which is arguably exactly what you
+  want the ceiling of a competitive game to feel like.
+
+*(Every claim above traces to a specific engineered feature and its measured importance — see
+`results/feature_importance.csv` and the per-version notes in `worklog.md`.)*
 
 ---
 
