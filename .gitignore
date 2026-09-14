@@ -1,0 +1,37 @@
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Data (Oracle's Elixir CSVs are large & redistributed from source; see data/README.md) ---
+data/*.csv
+data/*.tsv
+data/*.zip
+data/engineered_features*.csv
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+.ipynb_checkpoints/
+
+# --- Node / React (if the .jsx app is ever scaffolded into a project) ---
+node_modules/
+dist/
+build/
+.next/
+npm-debug.log*
+yarn-error.log*
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
