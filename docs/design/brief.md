@@ -2,7 +2,7 @@
 
 Design and build a single-page web app: a **pro League of Legends match predictor**. A visitor picks two pro teams and gets a win probability, an explanation of what drove it, and a player-by-player comparison. It will be deployed as a portfolio demo for a game-design role at Riot, so it must look deliberate and polished, and it must read in 30 seconds to someone who has never seen it. Desktop first, but it must work at 390px wide.
 
-**Reference mockups (match these):** https://claude.ai/artifact/6fvvdwuR7QS2BWC8VmYNWQ — page 1 has the chosen direction ("A · Broadcast") as a desktop artboard and a phone artboard. Build exactly that layout and system; the other page holds rejected directions — ignore it.
+**Reference:** the layout and visual system are fully specified below; the companion spec is `docs/design/spec.md`.
 
 ## Tech
 React + Tailwind (Vite). No UI or chart libraries. Fonts from Google Fonts: **Barlow Condensed** (500/600/700) for the wordmark, section labels, team names and every numeral; **IBM Plex Sans** (400/500/600) for body text. Fallbacks `"Arial Narrow", "Segoe UI", sans-serif` and `"Segoe UI", system-ui, sans-serif`. All logic in one pure-function module (`model.js`); components only render. Output a runnable project.

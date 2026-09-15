@@ -81,7 +81,7 @@ Added: Per-player KDA tracking, champion pools, hot streaks, trajectory, series 
 **Best:** GBDT AUC 0.6983, Acc 64.3%
 
 Added 28 features:
-- **Coach tracking** (via `data/coaches.tsv`): coach WR, experience, tenure, same-coach flag. Coach data scraped from Leaguepedia Cargo API using Chrome MCP tools (direct fetch was blocked by proxy).
+- **Coach tracking** (via `data/coaches.tsv`): coach WR, experience, tenure, same-coach flag. Coach data scraped from Leaguepedia Cargo API using browser automation (direct fetch was blocked by proxy).
 - **Travel/home advantage**: Team home region mapping → is_home, is_traveling, travel_diff.
 - **Regional playstyle profiles**: Positional resource allocation per region (gold share, damage share for top/mid/bot), carry position, playstyle distance.
 
@@ -216,12 +216,12 @@ First Stand 2026 (São Paulo, March 2026). BLG won 3-1 over G2 in finals.
 If starting a new session:
 
 1. **Read this file first** to understand architecture and current state.
-2. All code is in `/sessions/happy-sleepy-clarke/lol_predictor/` (or wherever the session places it).
+2. All code is in the `lol_predictor/` working directory.
 3. Raw data is in `data/` — 6 Oracle's Elixir CSVs + `coaches.tsv`.
 4. Latest engineered features: `data/engineered_features_v4.csv` (51088 × 166).
 5. Latest model weights: `models_v4/logistic_regression.npz` + `model_params.npz`.
 6. Latest React UI: `output_v4/lol_predictor_v4.jsx`.
-7. User deliverables are copied to: `/sessions/.../mnt/Downloads/lol_prediction_model_v4/`.
+7. User deliverables are copied to `lol_prediction_model_v4/`.
 
 To retrain: `cd lol_predictor && python3 train_and_evaluate_v4.py` (may need memory-optimized version — see V4 notes above about OOM).
 
