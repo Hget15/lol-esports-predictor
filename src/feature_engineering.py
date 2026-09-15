@@ -7,8 +7,11 @@ import pandas as pd
 import numpy as np
 import os
 import gc
-import warnings
-warnings.filterwarnings('ignore')
+
+# Warnings are deliberately left visible. A module-level
+# warnings.filterwarnings('ignore') would hide real problems (silent NaN
+# propagation, dtype coercion, deprecated pandas behaviour) behind a clean
+# console. Known-benign cases are handled at the call site instead.
 
 
 # ============================================================
@@ -120,6 +123,24 @@ def get_league_tier(league):
 # ============================================================
 
 class EloSystem:
+    """Elo rating system with league-tier-weighted K and off-season decay.
+
+    Why Elo: a single number per team that updates after every game using
+    only past results — a compact, leakage-free measure of strength. The 400
+    scale is the chess convention: a 400-point gap means the favourite is
+    expected to win ~91% of the time (ea = 1 / (1 + 10^((rb - ra) / 400))).
+
+    Tier-weighted K: k = K * (0.5 + 0.5 * tier / 3), so tier-3 (top) leagues
+    move ratings with the full K while tier-1 leagues get ~2/3 of it. Results
+    in stronger leagues are more informative and shouldn't be drowned out by
+    minor-league noise.
+
+    Off-season decay: shrink every rating 25% toward the mean (factor=0.75)
+    instead of resetting. Rosters churn heavily between seasons, so last
+    season's rating is real but weaker evidence — a hard reset would throw
+    away signal, while no decay would overrate teams that lost their stars.
+    """
+
     def __init__(self, initial=1500, k=32):
         self.initial = initial
         self.k = k
@@ -142,7 +163,15 @@ class EloSystem:
 
 
 class FastTracker:
-    """Memory-efficient stats tracker using fixed-size rolling buffers."""
+    """Memory-efficient stats tracker using fixed-size rolling buffers.
+
+    Why a ring buffer: the naive approach — a growing Python list of every
+    past game per team, sliced for each rolling window — was both slow and
+    memory-hungry across ~51k games and hundreds of teams. Each team instead
+    gets a fixed [BUFFER_SIZE x N_STATS] NumPy array written in a circle:
+    appending is O(1) and every rolling mean is one vectorized slice.
+    BUFFER_SIZE=30 is the largest window ever requested (20) plus slack.
+    """
 
     STAT_KEYS = [
         'result', 'gamelength', 'teamkills', 'teamdeaths', 'team kpm', 'ckpm',
@@ -305,6 +334,10 @@ def build_features(team_df, game_players, game_champions):
         tier = get_league_tier(league)
 
         # === PRE-MATCH FEATURES ===
+        # Leakage guard: every feature below is read from the Elo/tracker
+        # STATE AS IT STANDS BEFORE THIS GAME; the trackers are only updated
+        # with this game's result after the row is built. Games are processed
+        # in date order, so nothing from the future can leak into a feature.
         ea, eb = elo.get(ta), elo.get(tb)
         elo_exp = 1.0 / (1.0 + 10 ** ((eb - ea) / 400.0))
 

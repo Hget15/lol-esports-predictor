@@ -11,10 +11,12 @@ import pandas as pd
 import numpy as np
 import os
 import gc
-import warnings
 from collections import defaultdict
 
-warnings.filterwarnings('ignore')
+# Warnings are deliberately left visible. A module-level
+# warnings.filterwarnings('ignore') would hide real problems (silent NaN
+# propagation, dtype coercion, deprecated pandas behaviour) behind a clean
+# console. Known-benign cases are handled at the call site instead.
 
 
 # ============================================================
@@ -39,7 +41,16 @@ REGION_TO_INT = {
 # ============================================================
 
 class CoachTracker:
-    """Compact coach performance tracker."""
+    """Compact coach performance tracker.
+
+    Why coaches: rosters change, but a coaching staff's drafting philosophy
+    and preparation can persist across them, and a long-tenured coach/team
+    pairing is itself a stability signal. Coach-team-year mappings were
+    scraped from Leaguepedia (data/coaches.tsv). The tracker exposes a
+    coach's win rate with a given team, experience (games coached) and
+    tenure (seasons together), each computed only from games before the
+    current date.
+    """
 
     def __init__(self, window=30):
         self.window = window
@@ -94,7 +105,19 @@ class CoachTracker:
 # ============================================================
 
 class RegionalPlaystyleTracker:
-    """Lightweight regional playstyle tracker - uses simple averages."""
+    """Lightweight regional playstyle tracker - uses simple averages.
+
+    Why: regions play the game differently — how gold and damage are split
+    between top/mid/bot says whether a region funnels resources into one
+    carry lane or spreads them. Comparing two teams' regional profiles gives
+    a "style clash" distance feature.
+
+    Lesson baked in from a V3 bug: profiles must be keyed by a team's HOME
+    region, not the league of the event being played. At international
+    events every team shares the same event "league", so keying on it gave
+    both sides identical profiles and every playstyle feature came out zero.
+    Running sums/counts only — no per-game history — to stay light on memory.
+    """
 
     def __init__(self, window=200):
         self.window = window
@@ -347,15 +370,25 @@ def add_coach_features(v2_df, coaches_df, coach_tracker):
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
 
-    for col, vals in coach_features.items():
-        v2_df[col] = vals
+    # Attach all new columns with ONE concat rather than inserting them in a
+    # loop. Each single-column insert appends a new internal block, so the
+    # frame becomes progressively more fragmented (pandas raises a
+    # PerformanceWarning) and every later insert gets slower. Building the
+    # block once is faster and yields identical values and column order.
+    v2_df = pd.concat([v2_df, pd.DataFrame(coach_features, index=v2_df.index)], axis=1)
 
     print(f"Added {len(coach_features)} coach features")
     return v2_df
 
 
 def add_travel_features(v2_df, team_home_region):
-    """Add travel/regional features to V2 dataframe."""
+    """Add travel/regional features to V2 dataframe.
+
+    Why: at international events one side may be playing at (or near) home
+    while the other has crossed several time zones — a real, if modest,
+    disadvantage in a reaction-time game. is_home / is_traveling /
+    travel_diff encode that from each team's home region vs. the event's.
+    """
     print("\n" + "="*60)
     print("COMPUTING TRAVEL/REGIONAL FEATURES")
     print("="*60)
@@ -397,8 +430,9 @@ def add_travel_features(v2_df, team_home_region):
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
 
-    for col, vals in travel_features.items():
-        v2_df[col] = vals
+    # Single concat instead of per-column inserts (see add_coach_features):
+    # avoids DataFrame fragmentation; values and column order are identical.
+    v2_df = pd.concat([v2_df, pd.DataFrame(travel_features, index=v2_df.index)], axis=1)
 
     print(f"Added {len(travel_features)} travel/regional features")
     return v2_df
@@ -471,8 +505,9 @@ def add_playstyle_features(v2_df, playstyle_tracker, team_home_region):
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
 
-    for col, vals in playstyle_features.items():
-        v2_df[col] = vals
+    # Single concat instead of per-column inserts (see add_coach_features):
+    # avoids DataFrame fragmentation; values and column order are identical.
+    v2_df = pd.concat([v2_df, pd.DataFrame(playstyle_features, index=v2_df.index)], axis=1)
 
     print(f"Added {len(playstyle_features)} playstyle features")
     return v2_df
