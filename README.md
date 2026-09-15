@@ -148,6 +148,8 @@ lol-esports-predictor/
 ├── .env.example                  # env-var template (Riot API key placeholder)
 ├── src/                          # all model + feature-engineering code (pure NumPy)
 │   ├── ml_from_scratch.py        #   ML library: LR, GBDT, RF, NN, stacking, metrics
+│   ├── ml_from_scratch_v5.py     #   V5: corrected + faster library (this branch)
+│   ├── benchmark_v5.py           #   V4-vs-V5 head-to-head on local data (this branch)
 │   ├── feature_engineering.py    #   V1 features (baseline)
 │   ├── feature_engineering_v2.py #   V2 features
 │   ├── v3_enhancements.py        #   V3 features (coaches, travel, playstyle)
@@ -166,6 +168,9 @@ lol-esports-predictor/
 │   ├── model_comparison.csv      # V4 model metrics
 │   ├── feature_importance.csv    # top V4 GBDT features
 │   └── charts/{v2,v3}/           # ROC, calibration, feature-importance plots
+├── tests/
+│   └── test_ml_v5.py             # 24 unit tests for the V5 library (this branch)
+├── V5_NOTES.md                   # what V5 fixed, how it was verified, local benchmark
 └── data/                         # (gitignored) raw Oracle's Elixir CSVs — see data/README.md
 ```
 
@@ -194,6 +199,36 @@ Requires Python 3.9+ with `numpy`, `pandas`, `matplotlib`, `seaborn`.
 No script currently calls the Riot API. A development key was reserved for planned
 solo-queue data enrichment; if you wire it up, copy `.env.example` to `.env` and set
 `RIOT_API_KEY`. `.env` is gitignored.
+
+---
+
+## V5 — the corrected library (branch `v5`)
+
+`main` keeps the V1–V4 code exactly as it produced the published numbers. This
+branch adds a from-scratch **rewrite of the model library that fixes every known
+limitation** documented in the V4 comments — without touching those results:
+
+| Limitation in V4 | V5 fix |
+|---|---|
+| GBDT re-used a Gini *classification* tree on continuous residuals | One histogram-binned gradient tree optimising the exact second-order objective: variance-reduction mode for RF, Newton mode for GBDT |
+| Comment claimed "Newton-Raphson leaves"; code did first-order mean-residual leaves | True Newton leaves `−G/(H+λ)` with L2 leaf regularisation |
+| Python loop over 20 thresholds × full-array masks per feature per node | Vectorised `bincount`/`cumsum` histogram splits; binning shared by all trees; vectorised prediction |
+| Unseeded dropout masks and LR batch sampling | One seeded RNG drives everything — bit-for-bit reproducible |
+| Stacking mutated the caller's models; probability-space meta-features | Deep-copied per fold, genuinely out-of-fold, **logit-space** meta-learner (better calibrated) |
+| Split-count feature importance | Gain-weighted importance (split-count still available) |
+| NaN went left at fit time but right at predict time | Consistent "missing goes left" |
+
+Also new: validation-based early stopping (GBDT, NN), random-forest out-of-bag AUC,
+input validation, and no blanket warning suppression anywhere.
+
+- Library: [`src/ml_from_scratch_v5.py`](src/ml_from_scratch_v5.py)
+- Tests (24, stdlib `unittest`, ~2 s): `python -m unittest tests.test_ml_v5 -v`
+- Head-to-head vs. the V4 library on local data: `python src/benchmark_v5.py` —
+  results and caveats in [`V5_NOTES.md`](V5_NOTES.md)
+
+The V5 library has **not** been re-benchmarked on the full 51,088-game dataset (only
+the 2026 file is available locally), so the headline numbers above remain those of
+the V4 code on `main`.
 
 ---
 
