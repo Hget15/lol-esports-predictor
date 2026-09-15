@@ -2,7 +2,6 @@
 
 **Date:** 2026-09-15
 **Status:** approved by owner (direction A "Broadcast" chosen from three canvas explorations)
-**Canvas:** https://claude.ai/artifact/6fvvdwuR7QS2BWC8VmYNWQ (page 1 = chosen direction, desktop + phone)
 
 ## 1. Goal
 
