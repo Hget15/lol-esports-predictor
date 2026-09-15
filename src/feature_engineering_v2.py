@@ -17,8 +17,11 @@ import pandas as pd
 import numpy as np
 import os
 import gc
-import warnings
-warnings.filterwarnings('ignore')
+
+# Warnings are deliberately left visible. A module-level
+# warnings.filterwarnings('ignore') would hide real problems (silent NaN
+# propagation, dtype coercion, deprecated pandas behaviour) behind a clean
+# console. Known-benign cases are handled at the call site instead.
 
 
 # ============================================================
@@ -118,7 +121,13 @@ def is_lan_event(league):
 # ============================================================
 
 class PlayerTracker:
-    """Tracks individual player performance, champion pools, hot streaks."""
+    """Tracks individual player performance, champion pools, hot streaks.
+
+    Why player-level (the V2 idea): team-level stats go stale the moment a
+    roster changes — a substitute, an off-season rebuild — but the *players*
+    carry their form with them. Tracking by player id lets a team's strength
+    follow its people. Same ring-buffer design as the team tracker.
+    """
     BUF_SIZE = 30
     STATS = ['kills', 'deaths', 'assists', 'dpm', 'cspm', 'vspm',
              'earned gpm', 'golddiffat15', 'damageshare', 'earnedgoldshare']
@@ -185,7 +194,13 @@ class PlayerTracker:
         return np.mean(res) if res else 0.5
 
     def hot_streak(self, pid, short=3, long=15):
-        """Difference between recent short-term WR and longer-term WR. Positive = hot."""
+        """Difference between recent short-term WR and longer-term WR. Positive = hot.
+
+        Captures momentum: a player on 3 straight wins against a 50% long-run
+        record is in form in a way a plain win rate can't show. Kept as a
+        *difference* so it reads 0 for "playing to their usual level"
+        regardless of how good that level is.
+        """
         res = self.results.get(pid, [])
         if len(res) < short: return 0.0
         short_wr = np.mean(res[-short:])
@@ -193,7 +208,12 @@ class PlayerTracker:
         return short_wr - long_wr
 
     def trajectory(self, pid, stat='dpm', recent=5, historical=20):
-        """Compare recent performance to historical. Positive = improving."""
+        """Compare recent performance to historical. Positive = improving.
+
+        Normalized by the historical mean so it is scale-free: a +10% trend
+        means the same for damage-per-minute (hundreds) as for CS-per-minute
+        (single digits), so one definition serves every stat.
+        """
         buf, pos, count = self._buf(pid)
         if count < recent + 2: return 0.0
         idx = self.STAT_IDX.get(stat)
@@ -241,7 +261,14 @@ class PlayerTracker:
 # ============================================================
 
 class SeriesTracker:
-    """Track series context: Bo format, game momentum within series."""
+    """Track series context: Bo format, game momentum within series.
+
+    Why: a Bo5 is not five independent games. Being 2-0 up (or facing match
+    point) changes drafts and mentality, and Oracle's Elixir provides no
+    series id — so one is reconstructed from the gameid prefix plus the
+    sorted team pair, and per-series state (score, game number) is tracked
+    from it.
+    """
 
     def __init__(self):
         # Key: (date_approx, team_a, team_b) -> list of game results
@@ -303,7 +330,14 @@ class SeriesTracker:
 # ============================================================
 
 class FearlessDraftDetector:
-    """Detect if a match/tournament uses fearless draft (no champion reuse in series)."""
+    """Detect if a match/tournament uses fearless draft (no champion reuse in series).
+
+    Why: under fearless rules every champion picked earlier in a series is
+    locked out for the rest of it, so later games are drafted from a
+    shrinking pool and champion-comfort features mean something different.
+    The rule isn't a column in the data, so it is inferred: a series that
+    never repeats a pick across its games is treated as fearless.
+    """
 
     def __init__(self):
         self.series_picks = {}  # series_key -> set of picked champions
@@ -399,7 +433,12 @@ class TeamTracker:
         return np.mean(valid) if len(valid) > 0 else np.nan
 
     def weighted_win_rate(self, team, n=10):
-        """Win rate weighted by game importance (Bo3/5 > Bo1)."""
+        """Win rate weighted by game importance (Bo3/5 > Bo1).
+
+        Why: a best-of-five playoff game says more about a team than a
+        regular-season Bo1 — higher stakes, full preparation, no throwaway
+        drafts — so those results get more weight when estimating form.
+        """
         buf, pos, count = self._buf(team)
         if count == 0: return 0.5
         idx = self.STAT_IDX['result']
@@ -471,6 +510,13 @@ class TeamTracker:
 # ============================================================
 
 class EloSystem:
+    """Elo rating with league-tier-weighted K and off-season decay.
+
+    See feature_engineering.py for the full rationale: 400-point chess
+    scale, K scaled up for top-tier leagues (more informative results), and
+    a 25% shrink toward the mean at season boundaries rather than a reset.
+    """
+
     def __init__(self, initial=1500, k=32):
         self.initial = initial
         self.k = k
@@ -705,7 +751,13 @@ def build_features(team_df, game_players, game_champions, game_player_stats, gam
                 experiences.append(player_tracker.game_count(pid))
 
             # Aggregate
-            f[f'avg_player_kda_{side_label}'] = np.nanmean(kdas) if kdas else np.nan
+            # Guard on "any finite value", not merely "non-empty": a roster whose
+            # every player lacks KDA history gives an all-NaN list, and
+            # np.nanmean of that returns NaN *with* a RuntimeWarning ("Mean of
+            # empty slice"). Returning NaN explicitly yields the identical value
+            # without the noise — fix the cause rather than silence the symptom.
+            finite_kdas = [k for k in kdas if not np.isnan(k)]
+            f[f'avg_player_kda_{side_label}'] = np.mean(finite_kdas) if finite_kdas else np.nan
             f[f'avg_player_streak_{side_label}'] = np.mean(streaks) if streaks else 0
             f[f'avg_player_trajectory_{side_label}'] = np.mean(trajectories) if trajectories else 0
             f[f'avg_champ_comfort_{side_label}'] = np.mean(champ_comforts) if champ_comforts else 0.5

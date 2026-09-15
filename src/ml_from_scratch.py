@@ -1,21 +1,34 @@
 """
-Machine Learning algorithms implemented from scratch using only numpy.
-For LoL Esports Match Prediction Model.
+Machine-learning algorithms implemented from scratch with only NumPy.
+Core library for the LoL Esports Match Prediction Model.
+
+Why from scratch? The training environment had no package internet access
+(a proxy blocked `pip install`), so scikit-learn/XGBoost weren't available.
+Rather than treat that as a blocker, I implemented every model by hand — which
+also forced me to actually understand the mechanics rather than call `.fit()`
+on a black box.
+
+Design principle followed throughout: every estimator exposes the same small,
+scikit-learn-like surface — `fit(X, y)`, `predict_proba(X)`, `predict(X)` — so
+the training/evaluation scripts can treat all models interchangeably (this is
+what makes the model-comparison loop and the StackingEnsemble trivial to write).
 
 Includes:
-- Logistic Regression with L2 regularization (L-BFGS-style optimizer)
-- Decision Tree (CART)
-- Random Forest
-- Gradient Boosted Decision Trees
-- Simple Neural Network (MLP)
-- Stacking Ensemble
-- Evaluation metrics (AUC, Brier, Log Loss, Calibration)
+- Logistic Regression with L2 regularization (mini-batch SGD, decaying LR)
+- Decision Tree (CART, Gini impurity)
+- Random Forest (bagging + feature subsampling)
+- Gradient-Boosted Decision Trees (log-loss gradient boosting)
+- Neural Network (2-hidden-layer MLP: He init, Adam, dropout, early stopping)
+- Stacking Ensemble (out-of-fold meta-features)
+- Evaluation metrics (AUC, Brier, Log Loss, calibration) + temporal CV helpers
 """
 
 import numpy as np
-from collections import Counter
-import warnings
-warnings.filterwarnings('ignore')
+
+# NOTE: we deliberately do NOT blanket-suppress warnings here. The numerical
+# hot spots below (sigmoid, log-loss, standardization) each guard against their
+# own overflow/underflow/divide-by-zero explicitly, so warnings that do surface
+# are real signal worth seeing rather than noise to hide.
 
 
 # ============================================================
@@ -23,18 +36,35 @@ warnings.filterwarnings('ignore')
 # ============================================================
 
 def sigmoid(z):
+    # Clip before exp(): np.exp(-z) overflows to inf for z < ~-709, which would
+    # produce NaN probabilities and silently poison every downstream metric.
+    # Clipping at +/-500 keeps us safely inside float64 range while leaving the
+    # output indistinguishable from 0 or 1 at the extremes.
     z = np.clip(z, -500, 500)
     return 1.0 / (1.0 + np.exp(-z))
 
 def logloss(y_true, y_pred):
+    # log(0) = -inf. A single prediction of exactly 0.0 or 1.0 that's wrong
+    # would make the whole loss infinite, so clip into the open interval (0, 1).
     y_pred = np.clip(y_pred, 1e-15, 1 - 1e-15)
     return -np.mean(y_true * np.log(y_pred) + (1 - y_true) * np.log(1 - y_pred))
 
 def brier_score(y_true, y_pred):
+    # Brier = mean squared error of the probabilities. I track it alongside AUC
+    # because AUC only measures *ranking*; Brier also punishes miscalibration
+    # (e.g. a model that's confidently wrong). Lower is better.
     return np.mean((y_true - y_pred) ** 2)
 
 def roc_auc_score(y_true, y_pred):
-    """Compute ROC AUC using the rank-based (Mann-Whitney U) method."""
+    """Compute ROC AUC using the rank-based (Mann-Whitney U) method.
+
+    Why rank-based instead of sweeping thresholds and integrating the curve?
+    AUC is exactly the probability that a random positive is ranked above a
+    random negative, which the Mann-Whitney U statistic gives in closed form.
+    It's exact (no trapezoid approximation error) and O(n log n) from one sort.
+    Ties must be handled with average ranks or AUC is biased when the model
+    outputs repeated probabilities (common with tree ensembles).
+    """
     y_true = np.asarray(y_true, dtype=int)
     y_pred = np.asarray(y_pred, dtype=float)
     n_pos = np.sum(y_true == 1)
@@ -83,16 +113,35 @@ def calibration_bins(y_true, y_pred, n_bins=10):
     return np.array(bin_mids), np.array(bin_true_fracs), np.array(bin_counts)
 
 def train_test_split_temporal(X, y, dates, test_frac=0.2):
-    """Split data temporally — most recent games as test."""
+    """Split data temporally — most recent games as test.
+
+    This is the single most important methodological choice in the project.
+    A random shuffle-split would let the model "see the future": a game from
+    June could inform a prediction about a game from March, and rolling-window
+    features (Elo, recent win rate) for a March game are computed from data that
+    a random split might also place in the test set. That leaks and inflates
+    every metric. Ordering by date and testing only on the most recent slice
+    mirrors how the model would actually be used — predicting games that
+    haven't happened yet from games that have.
+    """
     order = np.argsort(dates)
     X, y, dates = X[order], y[order], dates[order]
     split_idx = int(len(y) * (1 - test_frac))
     return X[:split_idx], X[split_idx:], y[:split_idx], y[split_idx:], dates[:split_idx], dates[split_idx:]
 
 def standardize(X_train, X_test=None):
-    """Z-score standardization."""
+    """Z-score standardization.
+
+    mu/sigma are computed from the TRAINING set only and then applied to the
+    test set — fitting the scaler on test data would be another leakage path.
+    The returned mu/sigma are also what the React app needs to reproduce the
+    model's input space, which is why they get saved to model_params.npz.
+    """
     mu = np.nanmean(X_train, axis=0)
     sigma = np.nanstd(X_train, axis=0)
+    # A constant feature has sigma == 0, which would divide by zero and turn the
+    # whole column into NaN/inf. Setting sigma to 1 leaves such columns as
+    # (x - mu) = 0, i.e. harmlessly uninformative, instead of poisoning the row.
     sigma[sigma < 1e-8] = 1.0
     X_train_s = (X_train - mu) / sigma
     if X_test is not None:
@@ -106,6 +155,16 @@ def standardize(X_train, X_test=None):
 # ============================================================
 
 class LogisticRegression:
+    """Binary logistic regression trained with mini-batch SGD + L2 penalty.
+
+    Thought process: this is the baseline every other model has to beat, so it
+    should be simple and hard to get wrong. Mini-batches (rather than full-batch
+    gradient descent) keep each step cheap on 50k rows and add a little noise
+    that helps escape flat regions; the L2 term keeps weights small so that the
+    130 correlated features (many are `_a` / `_b` / `_diff` triples of the same
+    quantity) don't blow up into huge offsetting coefficients.
+    """
+
     def __init__(self, lr=0.01, n_iters=1000, lambda_reg=0.01, batch_size=256, verbose=False):
         self.lr = lr
         self.n_iters = n_iters
@@ -136,7 +195,10 @@ class LogisticRegression:
             dw = (1 / len(y_batch)) * (X_batch.T @ error) + self.lambda_reg * self.weights
             db = (1 / len(y_batch)) * np.sum(error)
 
-            # Adaptive learning rate (simple decay)
+            # Learning-rate decay: start aggressive to make fast early progress,
+            # then shrink so the noisy mini-batch gradients settle near the
+            # optimum instead of bouncing around it. 1/(1+k*i) is the classic
+            # Robbins-Monro schedule — simple and it converges in practice here.
             current_lr = self.lr / (1 + 0.001 * i)
             self.weights -= current_lr * dw
             self.bias -= current_lr * db
@@ -181,6 +243,17 @@ class DecisionTree:
         self.rng = np.random.RandomState(random_state)
 
     def _gini(self, y):
+        # Gini impurity for a binary target: 2p(1-p). It's 0 for a pure node
+        # and peaks at 0.5 for a 50/50 split. Chosen over entropy because it's
+        # cheaper (no log) and gives near-identical trees in practice.
+        #
+        # Design note: this same tree is reused as the base learner inside
+        # GradientBoostedTrees, where `y` is a vector of pseudo-residuals rather
+        # than 0/1 labels. Gini then acts as a heuristic split score on the
+        # residual mean instead of a true variance-reduction criterion. It works
+        # well empirically (it's the criterion behind the reported V4 results),
+        # but a purpose-built regression tree using variance reduction is the
+        # more principled choice — that's addressed in the V5 rewrite.
         if len(y) == 0:
             return 0
         p = np.mean(y)
@@ -194,7 +267,10 @@ class DecisionTree:
 
         parent_gini = self._gini(y)
 
-        # Feature subsetting (for random forest)
+        # Feature subsetting: when max_features is set (Random Forest), each
+        # split only considers a random subset of columns. This decorrelates the
+        # trees — without it every tree would grab the same few dominant
+        # features first and the ensemble would average nearly identical models.
         if self.max_features is not None:
             feature_indices = self.rng.choice(n_features, min(self.max_features, n_features), replace=False)
         else:
@@ -202,7 +278,12 @@ class DecisionTree:
 
         for feat_idx in feature_indices:
             col = X[:, feat_idx]
-            # Use percentile-based thresholds for speed
+            # Candidate thresholds: trying every unique value is O(n) per feature
+            # per node, which is far too slow for 50k rows x 130 features in pure
+            # Python. For continuous features I instead try 20 evenly spaced
+            # percentiles (5th..95th) — that captures the useful split points
+            # while making the whole tree build ~100x faster. Low-cardinality
+            # (<=20 unique) features still get exact thresholds.
             unique_vals = np.unique(col)
             if len(unique_vals) <= 20:
                 thresholds = unique_vals
@@ -277,6 +358,16 @@ class DecisionTree:
 # ============================================================
 
 class GradientBoostedTrees:
+    """Gradient boosting for binary classification (log-loss objective).
+
+    Thought process: boosting builds an additive model where each new tree is
+    fit to the *errors* of everything before it, so it can carve out the
+    interactions that a linear model can't (e.g. "new patch AND low patch-reps
+    AND traveling"). It ended up as the best model in V3 and V4. Shallow trees
+    (max_depth=4) + a small learning rate + row subsampling are the three knobs
+    that keep it from overfitting 50k rows.
+    """
+
     def __init__(self, n_estimators=200, learning_rate=0.1, max_depth=4,
                  min_samples_split=10, min_samples_leaf=5, subsample=0.8,
                  max_features=None, verbose=False, random_state=42):
@@ -297,13 +388,18 @@ class GradientBoostedTrees:
         n_samples = X.shape[0]
         rng = np.random.RandomState(self.random_state)
 
-        # Initialize with log-odds
+        # Initialize every sample at the base-rate log-odds. Starting from the
+        # prior (rather than 0) means tree #1 only has to explain deviations
+        # from the class balance, which converges faster and more stably.
         p = np.mean(y)
         self.initial_pred = np.log(p / (1 - p + 1e-15))
         F = np.full(n_samples, self.initial_pred)
 
         for i in range(self.n_estimators):
-            # Compute pseudo-residuals (negative gradient of log loss)
+            # Pseudo-residuals = negative gradient of log-loss w.r.t. F, which
+            # for the logistic link works out to the beautifully simple (y - p).
+            # Each tree is fit to these, i.e. to "what the model still gets
+            # wrong, and in which direction".
             p_hat = sigmoid(F)
             residuals = y - p_hat
 
@@ -323,7 +419,14 @@ class GradientBoostedTrees:
             )
             tree.fit(X[idx], residuals[idx])
 
-            # Update with Newton-Raphson leaf values
+            # Add the tree's contribution, shrunk by the learning rate.
+            # Each leaf predicts the mean residual of the samples that land in
+            # it, so this is standard first-order gradient boosting (Friedman,
+            # 2001). Note: it is NOT a Newton step — a true Newton/XGBoost-style
+            # leaf would divide by the summed Hessian p(1-p) to get the optimal
+            # leaf weight. The learning rate ("shrinkage") is what makes boosting
+            # robust: many small corrections generalize far better than a few
+            # large ones. Implementing proper Newton leaves is part of V5.
             predictions = tree.predict_proba(X)
             F += self.learning_rate * predictions
             self.trees.append(tree)
@@ -345,7 +448,16 @@ class GradientBoostedTrees:
         return (self.predict_proba(X) >= threshold).astype(int)
 
     def feature_importance(self, n_features):
-        """Compute simple feature importance based on split frequency."""
+        """Compute simple feature importance based on split frequency.
+
+        This counts how often each feature is chosen for a split across all
+        trees and normalizes to sum to 1. It's the simplest defensible
+        importance measure and is what produced results/feature_importance.csv.
+        Its limitation: a feature split on many times with tiny gains ranks the
+        same as one split on rarely with huge gains. A gain-weighted version
+        (sum of impurity reduction per split) is more informative and is what
+        V5 implements.
+        """
         importance = np.zeros(n_features)
 
         def _traverse(node):
@@ -368,6 +480,16 @@ class GradientBoostedTrees:
 # ============================================================
 
 class RandomForest:
+    """Bagged decision trees with per-split feature subsampling.
+
+    Thought process: a single deep tree overfits badly; averaging many trees
+    that each saw a different bootstrap sample AND a different random feature
+    subset at every split cancels out their individual quirks (variance
+    reduction). It's the "cheap and robust" ensemble — deeper trees than GBDT
+    (max_depth=8) because bagging tolerates overfit base learners in a way
+    boosting does not.
+    """
+
     def __init__(self, n_estimators=100, max_depth=8, min_samples_split=10,
                  min_samples_leaf=5, max_features='sqrt', bootstrap=True,
                  verbose=False, random_state=42):
@@ -428,6 +550,16 @@ class RandomForest:
 # ============================================================
 
 class NeuralNetwork:
+    """2-hidden-layer MLP for binary classification, written from scratch.
+
+    Thought process: the NN was included to test whether a flexible non-linear
+    learner could beat the tree ensembles on this tabular data. It didn't (trees
+    won every version), which matches the usual finding that GBDTs dominate on
+    small/medium tabular problems. The engineering choices — He init, Adam,
+    inverted dropout, early stopping on the best epoch — are the standard
+    recipe for making a small MLP train reliably without a framework.
+    """
+
     def __init__(self, hidden_sizes=(64, 32), lr=0.001, n_epochs=200,
                  batch_size=256, lambda_reg=0.001, dropout_rate=0.3,
                  verbose=False, random_state=42):
@@ -459,6 +591,12 @@ class NeuralNetwork:
         return (z > 0).astype(float)
 
     def _forward(self, X, training=False):
+        # Dropout uses an UNSEEDED RandomState here, so dropout masks differ
+        # run-to-run even when random_state is set — the NN is therefore not
+        # bit-for-bit reproducible. Weight init and batch order ARE seeded.
+        # Left as-is on this branch to keep behaviour identical to the reported
+        # runs (the NN was never a headline model); V5 threads the seeded RNG
+        # through so the whole network is reproducible.
         rng = np.random.RandomState()
         cache = {'A0': X}
         A = X
@@ -472,6 +610,10 @@ class NeuralNetwork:
                 # Hidden layer: ReLU + dropout
                 A = self._relu(Z)
                 if training and self.dropout_rate > 0:
+                    # "Inverted" dropout: scale the surviving activations up by
+                    # 1/(1-p) at train time so their expected magnitude matches
+                    # inference, where dropout is off. That way predict_proba
+                    # needs no special-casing — a classic source of subtle bugs.
                     mask = (rng.rand(*A.shape) > self.dropout_rate).astype(float)
                     A = A * mask / (1 - self.dropout_rate)
                     cache[f'mask{i+1}'] = mask
@@ -512,7 +654,12 @@ class NeuralNetwork:
         n_layers = len(self.hidden_sizes) + 1
         rng = np.random.RandomState(self.random_state)
 
-        # Adam optimizer state
+        # Adam optimizer state. Plain SGD was fragile here — 130 standardized
+        # features with very different gradient scales meant one global learning
+        # rate was either too slow for some weights or divergent for others.
+        # Adam keeps a per-parameter running mean (m) and variance (v) of the
+        # gradient and normalizes each update by them, which made training
+        # stable without hand-tuning the LR per layer.
         m_state = {k: np.zeros_like(v) for k, v in self.weights.items()}
         v_state = {k: np.zeros_like(v) for k, v in self.weights.items()}
         beta1, beta2, eps = 0.9, 0.999, 1e-8
@@ -555,7 +702,11 @@ class NeuralNetwork:
             loss = logloss(y, y_pred_full)
             self.losses.append(loss)
 
-            # Early stopping
+            # Early stopping with best-weight restore. Training loss keeps
+            # falling long after the network starts memorizing, so we snapshot
+            # the weights at the best epoch and roll back to them at the end
+            # rather than keeping whatever the final (overfit) epoch produced.
+            # Patience of 20 epochs avoids stopping on a single noisy plateau.
             if loss < best_loss - 1e-5:
                 best_loss = loss
                 patience_counter = 0
@@ -590,6 +741,23 @@ class NeuralNetwork:
 # ============================================================
 
 class StackingEnsemble:
+    """Stacked generalization: a meta-learner over the base models' outputs.
+
+    Thought process: different models make different mistakes (LR is well
+    calibrated but linear; GBDT captures interactions but can be overconfident).
+    Feeding their probabilities into a small logistic regression lets the data
+    decide how much to trust each one. The crucial detail is that the
+    meta-features must be OUT-OF-FOLD predictions — if a base model is scored
+    on the same rows it trained on, the meta-learner just learns "trust the
+    most overfit model", which is exactly wrong.
+
+    Implementation note (known limitation): the k-fold path re-fits the SAME
+    model instances across folds and then again on the full data, rather than
+    cloning a fresh instance per fold. It works because every model's fit()
+    fully re-initializes its state, but it mutates the caller's objects and
+    relies on that re-init behaviour. V5 clones per fold.
+    """
+
     def __init__(self, base_models, meta_model=None):
         """
         base_models: list of (name, model) tuples
@@ -674,6 +842,15 @@ def walk_forward_cv(X, y, dates, model_factory, n_splits=5, min_train_size=1000)
     """
     Time-series cross-validation where training always precedes test.
     model_factory: callable that returns a fresh model instance
+
+    Why not ordinary k-fold? Shuffled folds would train on 2025 games to score
+    2022 games — the same future-leakage problem train_test_split_temporal
+    avoids. Walk-forward instead grows the training window forward in time and
+    evaluates on the slice immediately after it, for several such slices. The
+    mean +/- std across folds tells us whether the headline test-set number is
+    stable across eras (patch metas, roster shuffles) or a lucky split.
+    Standardization is re-fit inside each fold, on that fold's training rows
+    only, for the same reason.
     """
     order = np.argsort(dates)
     X, y, dates = X[order], y[order], dates[order]

@@ -19,8 +19,10 @@ import os
 import sys
 import time
 import pickle
-import warnings
-warnings.filterwarnings('ignore')
+
+# Warnings are deliberately left visible (no blanket filterwarnings('ignore')):
+# during training, a RuntimeWarning is usually the first sign of a NaN/inf
+# leaking into the feature matrix or a degenerate metric, which we want to see.
 
 # Import our custom modules
 sys.path.insert(0, os.path.dirname(__file__))

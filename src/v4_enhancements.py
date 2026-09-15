@@ -12,10 +12,12 @@ import pandas as pd
 import numpy as np
 import os
 import gc
-import warnings
 from collections import defaultdict
 
-warnings.filterwarnings('ignore')
+# Warnings are deliberately left visible. A module-level
+# warnings.filterwarnings('ignore') would hide real problems (silent NaN
+# propagation, dtype coercion, deprecated pandas behaviour) behind a clean
+# console. Known-benign cases are handled at the call site instead.
 
 
 # ============================================================
@@ -23,7 +25,20 @@ warnings.filterwarnings('ignore')
 # ============================================================
 
 class PatchTracker:
-    """Tracks patch-level statistics and team performance on patches."""
+    """Tracks patch-level statistics and team performance on patches.
+
+    Why this exists (the V4 idea): a League patch can shift the meta enough
+    that last month's form is a weak guide to this week's game. So instead
+    of only asking "how good is this team?", V4 also asks "how good is this
+    team ON THIS PATCH, relative to its own recent form?" — see
+    get_patch_wr_delta, which became the single most important feature in
+    the final model (~25% of GBDT importance).
+
+    Memory design: an earlier version stored a full per-(team, patch) list
+    of dates/results and was OOM-killed on the 3.9 GB VM. This version keeps
+    only running counts (wins, games) plus a short recent-results list per
+    team, which is all the features actually need.
+    """
 
     def __init__(self):
         self.patch_games_count = defaultdict(int)        # patch -> total games before current
@@ -83,6 +98,16 @@ class PatchTracker:
         return sum(lst[-10:]) / len(lst[-10:])
 
     def get_patch_wr_delta(self, team, patch):
+        """Team's win rate on the current patch minus its recent (last-10) win rate.
+
+        This is THE headline feature. Positive = the team is playing above
+        its own baseline since the patch dropped (adapted well / the patch
+        suits their style); negative = the new patch knocked them off form.
+        It isolates *adaptation* from raw strength: a dominant team with a
+        delta near 0 is simply being itself, while a mid-table team with a
+        large positive delta is a live upset threat. NaN until the team has
+        actually played on the patch, so the model can never peek ahead.
+        """
         pwr = self.get_patch_wr(team, patch)
         rwr = self.get_recent_wr(team)
         if pd.isna(pwr) or pd.isna(rwr):
@@ -103,7 +128,20 @@ class PatchTracker:
 # ============================================================
 
 class ChampionMetaTracker:
-    """Tracks champion pick rates, win rates, and team comfort using running counts."""
+    """Tracks champion pick rates, win rates, and team comfort using running counts.
+
+    Why: the draft is the one part of a pro game decided before minute 0,
+    and it is rich with signal. Three angles are captured:
+      * global meta   — how often a champion is picked and how often it
+                        wins (a proxy for "is this pick currently strong?");
+      * team comfort  — how many of a team's picks are champions they've
+                        played recently (repetition = practised comps);
+      * conformity /  — how much a team plays the consensus top-20 meta, and
+        ban pressure    how many of the opponent's bans target this team's
+                        recent picks (a "respect" signal: you ban what you
+                        fear).
+    Everything is a running count, so the whole tracker fits in a few MB.
+    """
 
     def __init__(self):
         self.champ_picks = defaultdict(int)         # champ -> total picks
@@ -183,7 +221,16 @@ class ChampionMetaTracker:
 # ============================================================
 
 def build_all_from_raw(data_dir):
-    """Build trackers and gameid_drafts in a single pass through raw data."""
+    """Build trackers and gameid_drafts in a single pass through raw data.
+
+    Why single-pass: V4 was the version that kept dying to the OOM killer.
+    The raw Oracle's Elixir CSVs total ~450 MB and the VM had ~3.9 GB RAM
+    with no swap, so loading a whole year into a DataFrame and grouping was
+    fatal. Instead each year is streamed in 20k-row chunks, and ONE walk
+    through the data feeds both trackers and builds the gameid -> draft map
+    at the same time. The V3 feature table is loaded only afterwards, once
+    the big raw data is out of memory, to keep peak usage low.
+    """
     print("\nBuilding trackers + draft map from raw data...")
 
     patch_tracker = PatchTracker()
@@ -323,8 +370,12 @@ def add_patch_meta_features(v3_df, patch_tracker, gameid_drafts):
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
 
-    for col, vals in pf.items():
-        v3_df[col] = vals
+    # Attach all new columns with ONE concat rather than inserting them in a
+    # loop. Each single-column insert appends a new internal block, so the
+    # frame becomes progressively more fragmented (pandas raises a
+    # PerformanceWarning) and every later insert gets slower. Building the
+    # block once is faster and yields identical values and column order.
+    v3_df = pd.concat([v3_df, pd.DataFrame(pf, index=v3_df.index)], axis=1)
     print(f"Added {len(pf)} patch meta features")
     return v3_df
 
@@ -419,8 +470,9 @@ def add_champion_meta_features(v3_df, champ_tracker, gameid_drafts):
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
 
-    for col, vals in cf.items():
-        v3_df[col] = vals
+    # Single concat instead of per-column inserts (see add_patch_meta_features):
+    # avoids DataFrame fragmentation; values and column order are identical.
+    v3_df = pd.concat([v3_df, pd.DataFrame(cf, index=v3_df.index)], axis=1)
     print(f"Added {len(cf)} champion meta features (matched {matched}/{len(v3_df)} drafts)")
     return v3_df
 
