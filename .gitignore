@@ -35,3 +35,7 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# --- web app (app/) ---
+app/node_modules/
+app/dist/

@@ -1,0 +1,6 @@
+[
+  { "v": "V1", "auc": "0.688", "features": 63, "added": "Elo, rolling stats, game context" },
+  { "v": "V2", "auc": "0.698", "features": 79, "added": "+ player tracking, series momentum" },
+  { "v": "V3", "auc": "0.698", "features": 106, "added": "+ coaches, travel, regional playstyle" },
+  { "v": "V4", "auc": "0.797", "features": 130, "added": "+ patch meta, champion meta" }
+]

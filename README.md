@@ -9,6 +9,9 @@ random forest, a small MLP, and a stacking ensemble) is implemented by hand in
 Trained on **51,088 games** from [Oracle's Elixir](https://oracleselixir.com) (2021–2026),
 the final model reaches **AUC 0.797 / 72.1% accuracy** on a held-out, time-ordered test set.
 
+**Live demo:** https://hget15.github.io/lol-esports-predictor/ — pick any two pro teams and
+see the prediction with its reasoning.
+
 More than a modelling exercise, this is an attempt to answer a **game-design question with data**:
 *when two pro teams sit down, what actually decides the result?* The answer the model keeps
 returning is not raw team strength — it's **how quickly a team adapts to the current patch.**
@@ -156,9 +159,11 @@ lol-esports-predictor/
 │   ├── train_and_evaluate_v2.py  #   V2 training pipeline
 │   ├── train_and_evaluate_v3.py  #   V3 training pipeline
 │   └── simulate_fst2026.py       #   First Stand 2026 tournament back-test
-├── app/                          # React prediction UIs (Elo+WR proxy + player H2H)
-│   ├── lol_predictor_v4.jsx      #   latest
-│   └── lol_predictor_v2.jsx
+├── app/                          # live demo web app (Vite + React + Tailwind) → GitHub Pages
+│   ├── src/model.js              #   calibrated Elo + form proxy, H2H rule, URL state (pure functions)
+│   ├── src/App.jsx               #   render-only components
+│   ├── src/data/teams.json       #   50 teams, rosters as of Mar 2026
+│   └── legacy/                   #   the original single-file components (v2, v4)
 ├── models/                       # trained weights (NumPy .npz)
 │   ├── logistic_regression.npz
 │   └── model_params.npz          #   feature means/stds + names
@@ -185,9 +190,14 @@ Requires Python 3.9+ with `numpy`, `pandas`, `matplotlib`, `seaborn`.
    ```
    The build environment was memory-constrained (~3.9 GB RAM), so the scripts read CSVs in
    chunks and free memory aggressively — see `worklog.md` for the memory notes.
-3. **Prediction UI** — the `app/*.jsx` files are self-contained React components that use a
-   calibrated Elo+WR proxy formula (a faithful simplification of the full model) plus
-   per-position player head-to-head stats. Drop one into any React scaffold to run it.
+3. **Prediction UI** — the live demo is a small Vite app in `app/`:
+   ```bash
+   cd app && npm install && npm run dev
+   ```
+   `npm test` pins the model's numbers (Gen.G vs T1 → 0.629). It uses a calibrated
+   Elo + form proxy of the full model (a faithful simplification — the real model needs
+   a full 130-feature vector per game) plus per-role player head-to-head stats. The
+   original single-file components are kept in `app/legacy/`.
 
 ### Riot API key
 
