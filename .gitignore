@@ -7,6 +7,7 @@
 data/*.csv
 data/*.tsv
 data/*.zip
+data/*.json
 data/engineered_features*.csv
 
 # --- Python ---

@@ -59,7 +59,7 @@ Single page, max content width 1000px centered, 40px side padding on desktop.
 Order top to bottom:
 
 1. **Header** — wordmark "LOL ESPORTS PREDICTOR" + "V4" tag; three stat chips:
-   `51,088 GAMES · 2021–26`, `AUC 0.797`, `130 FEATURES`.
+   `58,842 GAMES · 2021–26`, `AUC 0.722`, `130 FEATURES`.
 2. **Intro** — one sentence: what this is and that it shows its reasoning.
 3. **Matchup** — two team cards side by side (Team A · Blue side / Team B · Red side).
    Each holds a styled native `<select>` of the 50 teams (sorted) and the team's

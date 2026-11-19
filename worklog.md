@@ -1,5 +1,15 @@
 # LoL Esports Match Prediction Model — Worklog
 
+> **Correction, November 2026.** This is the original development log and is kept as
+> written, but its V4 results are wrong. The V4 feature script built its patch and champion
+> trackers from every game before computing features, so each game's features included its
+> own result and later games. The reported V4 figures (AUC 0.797, 72.1% accuracy) and the
+> ranking of `patch_wr_delta_diff` as the top feature are artifacts of that look-ahead.
+> With the features computed correctly and all versions rerun on one split (data through
+> November 2026), the results are: Elo only 62.7% accuracy, V1 65.5%, V2 65.8%, V3 65.8%,
+> V4 66.2% (AUC 0.722). See `README.md` for the corrected analysis. The First Stand
+> simulation figures for V4 below are affected in the same way.
+
 ## Project Overview
 
 Comprehensive ML prediction model for League of Legends esports matches, built from scratch using only NumPy (no sklearn — pip proxy blocked). Trained on 51,088 games from Oracle's Elixir data (2021–2026). Evolved through 4 major versions, culminating in AUC 0.797 on held-out test data.
@@ -93,7 +103,7 @@ Added 28 features:
 
 **Script:** `v4_enhancements.py` → `train_and_evaluate_v4.py`
 **Output:** `data/engineered_features_v4.csv`, `output_v4/`, `models_v4/`
-**Best:** GBDT AUC 0.7970, Acc 72.1%
+**Best:** GBDT AUC 0.7970, Acc 72.1% — *invalid: inflated by look-ahead, see the correction at the top (corrected: LR AUC 0.722, 66.2%)*
 
 Added 24 features:
 - **Patch meta**: `patch_maturity` (log-scaled game count on patch), `is_new_patch`, `team_patch_games_a/b/diff`, `patch_wr_delta_a/b/diff` (patch WR vs recent WR), `patch_age_days`
@@ -182,11 +192,11 @@ lol_predictor/
 | V1      | LR            | 0.6881 | 0.2230 | 63.5%    | 63       |
 | V2      | Ensemble      | 0.6976 | 0.2197 | 64.1%    | 79       |
 | V3      | GBDT          | 0.6983 | 0.2200 | 64.3%    | 106      |
-| **V4**  | **GBDT**      | **0.7970** | **0.1879** | **72.1%** | **130** |
+| V4 (invalid, look-ahead) | GBDT | ~~0.7970~~ | ~~0.1879~~ | ~~72.1%~~ | 130 |
 
 Test split: last 15% of games by date (~6,874 games). All versions use identical split.
 
-Top V4 features (GBDT importance): `patch_wr_delta_diff` (25.3%), `player_experience_diff` (8.2%), `team_patch_games_diff` (8.0%), `avg20_earned_gpm_diff` (5.2%).
+Top V4 features in the invalid run (GBDT importance): `patch_wr_delta_diff` (25.3%), `player_experience_diff` (8.2%), `team_patch_games_diff` (8.0%), `avg20_earned_gpm_diff` (5.2%).
 
 ---
 

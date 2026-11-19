@@ -19,11 +19,19 @@ data/
 ├── 2024_LoL_esports_match_data_from_OraclesElixir.csv
 ├── 2025_LoL_esports_match_data_from_OraclesElixir.csv
 ├── 2026_LoL_esports_match_data_from_OraclesElixir.csv
-└── coaches.tsv          # coach↔team↔year mappings (scraped from Leaguepedia; ~230 rows)
+└── coaches.tsv          # coach per team and year — built by `python src/build_coaches.py`
 ```
 
 Each CSV has 165 columns and 12 rows per game (10 player rows + 2 team-summary rows).
 See the root `worklog.md` for the full column reference.
+
+## Coach data
+
+`coaches.tsv` is not downloaded by hand. `python src/build_coaches.py` (run from the repo
+root, after the V1 feature script) pulls coaching-staff changes from Leaguepedia's public
+API and writes one head coach per team and year. The API is rate-limited, so the first run
+takes several minutes; the download is cached in `data/leaguepedia_roster_changes.json`.
+Leaguepedia content is CC BY-SA 3.0, so neither file is committed.
 
 ## Regenerating engineered features
 

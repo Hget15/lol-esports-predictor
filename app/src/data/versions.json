@@ -1,6 +1,7 @@
 [
-  { "v": "V1", "auc": "0.688", "features": 63, "added": "Elo, rolling stats, game context" },
-  { "v": "V2", "auc": "0.698", "features": 79, "added": "+ player tracking, series momentum" },
-  { "v": "V3", "auc": "0.698", "features": 106, "added": "+ coaches, travel, regional playstyle" },
-  { "v": "V4", "auc": "0.797", "features": 130, "added": "+ patch meta, champion meta" }
+  { "v": "Elo", "auc": "0.678", "features": 1, "added": "Rating only, no model" },
+  { "v": "V1", "auc": "0.710", "features": 59, "added": "Elo, rolling stats, game context" },
+  { "v": "V2", "auc": "0.714", "features": 79, "added": "+ player tracking, series momentum" },
+  { "v": "V3", "auc": "0.717", "features": 106, "added": "+ coaches, travel, regional playstyle" },
+  { "v": "V4", "auc": "0.722", "features": 130, "added": "+ patch meta, champion meta" }
 ]

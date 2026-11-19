@@ -28,7 +28,7 @@ function Header() {
         <span className="font-display text-[14px] font-semibold tracking-[0.1em] text-gold">V4</span>
       </div>
       <ul className="flex flex-wrap gap-2">
-        {["51,088 GAMES · 2021–26", "AUC 0.797", "130 FEATURES"].map(c => (
+        {["58,842 GAMES · 2021–26", "AUC 0.722", "130 FEATURES"].map(c => (
           <li key={c} className="rounded-[3px] border border-line-strong px-3 py-1.5 font-display text-[13px] font-semibold tracking-[0.06em] text-ink-soft">{c}</li>
         ))}
       </ul>
@@ -134,8 +134,8 @@ function Drivers({ drivers, nameA, total, pA }) {
         ))}
       </div>
       <p className="mt-6 border-t border-line pt-4 text-[12px] leading-relaxed text-ink-muted">
-        <span className="hidden md:inline">Log-odds contributions toward {nameA}. They sum to {total}, which is {pA}%. Form on the current patch matters more than raw rating — the model's central finding.</span>
-        <span className="md:hidden">Log-odds toward {nameA}, summing to {total} = {pA}%. Form on the current patch beats the rating gap.</span>
+        <span className="hidden md:inline">Log-odds contributions toward {nameA}. They sum to {total}, which is {pA}%. Rating and recent form carry most of what the full model knows.</span>
+        <span className="md:hidden">Log-odds toward {nameA}, summing to {total} = {pA}%. Rating and form carry most of the signal.</span>
       </p>
     </section>
   );
@@ -217,7 +217,7 @@ function AboutModel() {
               ))}
             </tbody>
           </table>
-          <p className="mt-4 text-[12px] leading-relaxed text-ink-muted">The page uses a calibrated Elo + form proxy of the full model; the real model needs a full 130-feature vector per game.</p>
+          <p className="mt-4 text-[12px] leading-relaxed text-ink-muted">The page uses a calibrated Elo + form proxy of the full model; the real model needs a full 130-feature vector per game. On 7,977 held-out games the full model is right 66.2% of the time, against 62.7% for Elo alone.</p>
         </div>
       )}
     </section>

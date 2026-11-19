@@ -5,7 +5,10 @@ Enriches V3 features with:
 1. Patch Meta Features: patch maturity, team patch performance, patch adaptation
 2. Champion Meta Features: global pick/win rates, team comfort, ban targeting
 
-Memory-optimized: single-pass tracker building, no full-history storage.
+Every feature for a game is built only from games that finished before it:
+games are collected, sorted by date, and each one is read from the trackers
+before it is recorded (see build_pre_game_features). The first version of this
+file did not do that and its results were inflated by look-ahead.
 """
 
 import pandas as pd
@@ -31,8 +34,11 @@ class PatchTracker:
     that last month's form is a weak guide to this week's game. So instead
     of only asking "how good is this team?", V4 also asks "how good is this
     team ON THIS PATCH, relative to its own recent form?" — see
-    get_patch_wr_delta, which became the single most important feature in
-    the final model (~25% of GBDT importance).
+    get_patch_wr_delta.
+
+    The tracker itself has no notion of time: it answers from whatever has
+    been recorded so far. It is only leak-free when the caller queries it
+    BEFORE recording the game in question, in date order.
 
     Memory design: an earlier version stored a full per-(team, patch) list
     of dates/results and was OOM-killed on the 3.9 GB VM. This version keeps
@@ -100,13 +106,15 @@ class PatchTracker:
     def get_patch_wr_delta(self, team, patch):
         """Team's win rate on the current patch minus its recent (last-10) win rate.
 
-        This is THE headline feature. Positive = the team is playing above
-        its own baseline since the patch dropped (adapted well / the patch
-        suits their style); negative = the new patch knocked them off form.
-        It isolates *adaptation* from raw strength: a dominant team with a
-        delta near 0 is simply being itself, while a mid-table team with a
-        large positive delta is a live upset threat. NaN until the team has
-        actually played on the patch, so the model can never peek ahead.
+        Positive = the team is playing above its own baseline since the patch
+        dropped; negative = the new patch knocked them off form. The idea is
+        to separate adaptation from raw strength. NaN until the team has a
+        recorded game on the patch.
+
+        Computed from recorded games only, so it is a pre-game quantity only
+        if the current game has not been recorded yet. When it was queried
+        after recording every game, it contained the result being predicted
+        and looked like the strongest feature in the model; it is not.
         """
         pwr = self.get_patch_wr(team, patch)
         rwr = self.get_recent_wr(team)
@@ -217,115 +225,132 @@ class ChampionMetaTracker:
 
 
 # ============================================================
-# SINGLE-PASS: BUILD TRACKERS + DRAFT MAP
+# COLLECT GAMES, THEN BUILD FEATURES IN DATE ORDER (NO LOOK-AHEAD)
 # ============================================================
 
-def build_all_from_raw(data_dir):
-    """Build trackers and gameid_drafts in a single pass through raw data.
+ROLES = ('top', 'jng', 'mid', 'bot', 'sup')
+RAW_COLS = ['gameid', 'date', 'patch', 'teamname', 'champion', 'position',
+            'ban1', 'ban2', 'ban3', 'ban4', 'ban5',
+            'pick1', 'pick2', 'pick3', 'pick4', 'pick5', 'result']
 
-    Why single-pass: V4 was the version that kept dying to the OOM killer.
-    The raw Oracle's Elixir CSVs total ~450 MB and the VM had ~3.9 GB RAM
-    with no swap, so loading a whole year into a DataFrame and grouping was
-    fatal. Instead each year is streamed in 20k-row chunks, and ONE walk
-    through the data feeds both trackers and builds the gameid -> draft map
-    at the same time. The V3 feature table is loaded only afterwards, once
-    the big raw data is out of memory, to keep peak usage low.
+
+def collect_games_from_raw(data_dir):
+    """Read every game's draft and result from the raw CSVs, sorted by date.
+
+    Returns one compact record per game: gameid, date, patch and, for each of
+    the two teams, its name, result, champions played, draft picks and bans.
+    Nothing is computed here. Only the 17 needed columns are loaded, so a
+    whole year fits in memory comfortably and no game is split across a chunk
+    boundary (the earlier chunked reader silently dropped games whose two
+    team rows landed in different chunks).
     """
-    print("\nBuilding trackers + draft map from raw data...")
-
-    patch_tracker = PatchTracker()
-    champ_tracker = ChampionMetaTracker()
-    gameid_drafts = {}
-    games_processed = 0
-    seen_gameids = set()
-
-    usecols = ['gameid', 'date', 'patch', 'teamname', 'champion', 'position',
-               'ban1', 'ban2', 'ban3', 'ban4', 'ban5',
-               'pick1', 'pick2', 'pick3', 'pick4', 'pick5', 'result']
-
+    print("\nCollecting games from raw data...")
+    games = []
     for year in range(2021, 2027):
         path = os.path.join(data_dir, f'{year}_LoL_esports_match_data_from_OraclesElixir.csv')
         if not os.path.exists(path):
             continue
         print(f"  Reading {year}...", end='', flush=True)
-        try:
-            for chunk in pd.read_csv(path, usecols=usecols, chunksize=20000, low_memory=False):
-                chunk['date'] = pd.to_datetime(chunk['date'], errors='coerce')
-                team_chunk = chunk[chunk['position'] == 'team']
-                player_chunk = chunk[chunk['position'].isin(['top', 'jng', 'mid', 'bot', 'sup'])]
+        df = pd.read_csv(path, usecols=RAW_COLS, low_memory=False)
+        df['date'] = pd.to_datetime(df['date'], errors='coerce')
+        n_before = len(games)
+        for gameid, g in df.groupby('gameid', sort=False):
+            teams = g[g['position'] == 'team']
+            if len(teams) != 2:
+                continue
+            ra, rb = teams.iloc[0], teams.iloc[1]
+            if pd.isna(ra['result']) or pd.isna(rb['result']) or pd.isna(ra['date']):
+                continue
+            players = g[g['position'].isin(ROLES)]
+            sides = []
+            for r in (ra, rb):
+                champs = players[players['teamname'] == r['teamname']]['champion'].dropna().tolist()
+                picks = [r[f'pick{i}'] for i in range(1, 6) if pd.notna(r[f'pick{i}'])]
+                bans = [r[f'ban{i}'] for i in range(1, 6) if pd.notna(r[f'ban{i}'])]
+                sides.append({'team': str(r['teamname']), 'result': int(r['result']),
+                              'champs': champs or picks, 'picks': picks or champs, 'bans': bans})
+            games.append({'gameid': str(gameid), 'date': ra['date'], 'patch': ra['patch'], 'sides': sides})
+        print(f" done ({len(games) - n_before} games)")
+        del df
+        gc.collect()
 
-                for gameid, game_teams in team_chunk.groupby('gameid'):
-                    if gameid in seen_gameids:
-                        continue
-                    if len(game_teams) != 2:
-                        continue
-                    seen_gameids.add(gameid)
+    # Date order is what makes "before this game" well defined. The raw files
+    # are only roughly chronological, so sort explicitly.
+    games.sort(key=lambda g: (g['date'], g['gameid']))
+    print(f"  Collected {len(games)} games")
+    return games
 
-                    ra, rb = game_teams.iloc[0], game_teams.iloc[1]
-                    date = ra['date']
-                    patch = ra['patch']
-                    ta = str(ra['teamname'])
-                    tb = str(rb['teamname'])
-                    res_a, res_b = ra['result'], rb['result']
 
-                    if pd.isna(res_a) or pd.isna(res_b) or pd.isna(date):
-                        continue
-                    res_a, res_b = int(res_a), int(res_b)
+def _mean_or_nan(values):
+    vals = [v for v in values if not pd.isna(v)]
+    return float(np.mean(vals)) if vals else np.nan
 
-                    # Patch tracking
-                    patch_tracker.record_game(patch, date, ta, res_a, tb, res_b)
 
-                    # Get champion picks
-                    gp = player_chunk[player_chunk['gameid'] == gameid]
-                    champs_a = gp[gp['teamname'] == ra['teamname']]['champion'].dropna().tolist()
-                    champs_b = gp[gp['teamname'] == rb['teamname']]['champion'].dropna().tolist()
+def build_pre_game_features(games):
+    """Walk the games in date order: read the trackers, THEN record the game.
 
-                    picks_a = [ra.get(f'pick{i}') for i in range(1, 6)]
-                    picks_b = [rb.get(f'pick{i}') for i in range(1, 6)]
-                    picks_a = [p for p in picks_a if pd.notna(p)]
-                    picks_b = [p for p in picks_b if pd.notna(p)]
+    This ordering is the whole point. An earlier version of this file filled
+    both trackers with every game in the dataset first and queried them
+    afterwards, so "win rate on the current patch" included the result of the
+    game being predicted (and of later games), and "recent form" was the
+    team's last ten games of the entire dataset. That look-ahead inflated the
+    reported V4 test AUC to 0.797 (it is 0.72 without it) and made
+    patch_wr_delta_diff look like the dominant feature. Querying before
+    recording removes it: each game's features are built only from games that
+    finished earlier.
 
-                    if not champs_a:
-                        champs_a = picks_a
-                    if not champs_b:
-                        champs_b = picks_b
+    Features are stored per team name, so they attach to the right side of
+    the feature table whichever order the raw file listed the two teams in.
+    """
+    patch_tracker = PatchTracker()
+    champ_tracker = ChampionMetaTracker()
+    feats = {}
 
-                    # Champion tracking
-                    champ_tracker.record_game(champs_a, champs_b, res_a, res_b)
-                    champ_tracker.record_team_game(ta, champs_a, tb, champs_b)
+    for g in games:
+        patch, date = g['patch'], g['date']
+        a, b = g['sides']
 
-                    # Draft map (for later feature computation)
-                    bans_a = [ra.get(f'ban{i}') for i in range(1, 6)]
-                    bans_b = [rb.get(f'ban{i}') for i in range(1, 6)]
-                    gameid_drafts[gameid] = {
-                        'picks_a': picks_a if picks_a else champs_a,
-                        'picks_b': picks_b if picks_b else champs_b,
-                        'bans_a': bans_a,
-                        'bans_b': bans_b,
-                        'patch': patch,
-                    }
+        entry = {
+            'patch_maturity': patch_tracker.get_patch_maturity(patch),
+            'is_new_patch': patch_tracker.get_is_new_patch(patch),
+            'patch_age_days': patch_tracker.get_patch_age_days(patch, date),
+            'teams': {},
+        }
+        for me, opp in ((a, b), (b, a)):
+            entry['teams'][me['team']] = {
+                'team_patch_games': patch_tracker.get_team_patch_games(me['team'], patch),
+                'patch_wr_delta': patch_tracker.get_patch_wr_delta(me['team'], patch),
+                'avg_pick_rate': _mean_or_nan(champ_tracker.get_global_pick_rate(c) for c in me['picks']),
+                'avg_champ_wr': _mean_or_nan(champ_tracker.get_global_win_rate(c) for c in me['picks']),
+                'team_champ_comfort': champ_tracker.get_team_champ_comfort(me['team'], me['picks']),
+                'meta_conformity': champ_tracker.get_meta_conformity(me['picks']),
+                # "Respect" signal: how many of the OPPONENT's bans hit this team's recent picks.
+                'ban_target': champ_tracker.get_ban_target_count(me['team'], opp['bans']),
+            }
+        feats[g['gameid']] = entry
 
-                    games_processed += 1
+        # Only now does this game become part of history.
+        patch_tracker.record_game(patch, date, a['team'], a['result'], b['team'], b['result'])
+        champ_tracker.record_game(a['champs'], b['champs'], a['result'], b['result'])
+        champ_tracker.record_team_game(a['team'], a['champs'], b['team'], b['champs'])
 
-                del team_chunk, player_chunk
-            gc.collect()
-            print(f" done ({games_processed} games)")
-        except Exception as e:
-            print(f" ERROR: {e}")
-            import traceback
-            traceback.print_exc()
+    print(f"  Built pre-game features for {len(feats)} games")
+    return feats
 
-    del seen_gameids
-    gc.collect()
-    print(f"  Trackers built with {games_processed} games, {len(gameid_drafts)} draft records")
-    return patch_tracker, champ_tracker, gameid_drafts
+
+def _lookup(game_feats, row):
+    """Pre-game features for this row's game and its two teams (None if unmatched)."""
+    entry = game_feats.get(str(row['gameid']))
+    if not entry:
+        return None, None, None
+    return entry, entry['teams'].get(str(row['team_a'])), entry['teams'].get(str(row['team_b']))
 
 
 # ============================================================
 # FEATURE BUILDERS
 # ============================================================
 
-def add_patch_meta_features(v3_df, patch_tracker, gameid_drafts):
+def add_patch_meta_features(v3_df, game_feats):
     """Add patch meta features to V3 dataframe."""
     print("\n" + "="*60)
     print("COMPUTING PATCH META FEATURES")
@@ -344,28 +369,26 @@ def add_patch_meta_features(v3_df, patch_tracker, gameid_drafts):
         'patch_age_days': np.full(n, np.nan),
     }
 
+    matched = 0
     for idx, row in v3_df.iterrows():
-        ta, tb, date = row['team_a'], row['team_b'], row['date']
-        draft = gameid_drafts.get(row['gameid'], {})
-        patch = draft.get('patch', np.nan)
+        entry, fa, fb = _lookup(game_feats, row)
+        if fa is None or fb is None:
+            continue
+        matched += 1
 
-        pf['patch_maturity'][idx] = patch_tracker.get_patch_maturity(patch)
-        pf['is_new_patch'][idx] = patch_tracker.get_is_new_patch(patch)
+        pf['patch_maturity'][idx] = entry['patch_maturity']
+        pf['is_new_patch'][idx] = entry['is_new_patch']
+        pf['patch_age_days'][idx] = entry['patch_age_days']
 
-        tpg_a = patch_tracker.get_team_patch_games(ta, patch)
-        tpg_b = patch_tracker.get_team_patch_games(tb, patch)
-        pf['team_patch_games_a'][idx] = tpg_a
-        pf['team_patch_games_b'][idx] = tpg_b
-        pf['team_patch_games_diff'][idx] = tpg_a - tpg_b
+        pf['team_patch_games_a'][idx] = fa['team_patch_games']
+        pf['team_patch_games_b'][idx] = fb['team_patch_games']
+        pf['team_patch_games_diff'][idx] = fa['team_patch_games'] - fb['team_patch_games']
 
-        pwd_a = patch_tracker.get_patch_wr_delta(ta, patch)
-        pwd_b = patch_tracker.get_patch_wr_delta(tb, patch)
+        pwd_a, pwd_b = fa['patch_wr_delta'], fb['patch_wr_delta']
         pf['patch_wr_delta_a'][idx] = pwd_a
         pf['patch_wr_delta_b'][idx] = pwd_b
         if not (pd.isna(pwd_a) or pd.isna(pwd_b)):
             pf['patch_wr_delta_diff'][idx] = pwd_a - pwd_b
-
-        pf['patch_age_days'][idx] = patch_tracker.get_patch_age_days(patch, date)
 
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
@@ -376,12 +399,12 @@ def add_patch_meta_features(v3_df, patch_tracker, gameid_drafts):
     # PerformanceWarning) and every later insert gets slower. Building the
     # block once is faster and yields identical values and column order.
     v3_df = pd.concat([v3_df, pd.DataFrame(pf, index=v3_df.index)], axis=1)
-    print(f"Added {len(pf)} patch meta features")
+    print(f"Added {len(pf)} patch meta features (matched {matched}/{n} games)")
     return v3_df
 
 
-def add_champion_meta_features(v3_df, champ_tracker, gameid_drafts):
-    """Add champion meta features using pre-built draft map."""
+def add_champion_meta_features(v3_df, game_feats):
+    """Add champion meta features to V3 dataframe."""
     print("\n" + "="*60)
     print("COMPUTING CHAMPION META FEATURES")
     print("="*60)
@@ -407,65 +430,21 @@ def add_champion_meta_features(v3_df, champ_tracker, gameid_drafts):
 
     matched = 0
     for idx, row in v3_df.iterrows():
-        gameid = row['gameid']
-        ta, tb = row['team_a'], row['team_b']
-
-        draft = gameid_drafts.get(gameid)
-        if not draft:
+        _, fa, fb = _lookup(game_feats, row)
+        if fa is None or fb is None:
             continue
         matched += 1
 
-        pa = draft['picks_a']
-        pb = draft['picks_b']
-        ba = draft['bans_a']
-        bb = draft['bans_b']
+        for name in ('avg_pick_rate', 'avg_champ_wr', 'team_champ_comfort', 'meta_conformity'):
+            va, vb = fa[name], fb[name]
+            cf[f'{name}_a'][idx] = va
+            cf[f'{name}_b'][idx] = vb
+            if not (pd.isna(va) or pd.isna(vb)):
+                cf[f'{name}_diff'][idx] = va - vb
 
-        # Pick rates
-        pra = [champ_tracker.get_global_pick_rate(c) for c in pa]
-        prb = [champ_tracker.get_global_pick_rate(c) for c in pb]
-        va = [r for r in pra if not pd.isna(r)]
-        vb = [r for r in prb if not pd.isna(r)]
-        if va:
-            cf['avg_pick_rate_a'][idx] = np.mean(va)
-        if vb:
-            cf['avg_pick_rate_b'][idx] = np.mean(vb)
-        if va and vb:
-            cf['avg_pick_rate_diff'][idx] = np.mean(va) - np.mean(vb)
-
-        # Win rates
-        wra = [champ_tracker.get_global_win_rate(c) for c in pa]
-        wrb = [champ_tracker.get_global_win_rate(c) for c in pb]
-        vwa = [w for w in wra if not pd.isna(w)]
-        vwb = [w for w in wrb if not pd.isna(w)]
-        if vwa:
-            cf['avg_champ_wr_a'][idx] = np.mean(vwa)
-        if vwb:
-            cf['avg_champ_wr_b'][idx] = np.mean(vwb)
-        if vwa and vwb:
-            cf['avg_champ_wr_diff'][idx] = np.mean(vwa) - np.mean(vwb)
-
-        # Comfort
-        ca = champ_tracker.get_team_champ_comfort(ta, pa)
-        cb = champ_tracker.get_team_champ_comfort(tb, pb)
-        cf['team_champ_comfort_a'][idx] = ca
-        cf['team_champ_comfort_b'][idx] = cb
-        if not (pd.isna(ca) or pd.isna(cb)):
-            cf['team_champ_comfort_diff'][idx] = ca - cb
-
-        # Meta conformity
-        ma = champ_tracker.get_meta_conformity(pa)
-        mb = champ_tracker.get_meta_conformity(pb)
-        cf['meta_conformity_a'][idx] = ma
-        cf['meta_conformity_b'][idx] = mb
-        if not (pd.isna(ma) or pd.isna(mb)):
-            cf['meta_conformity_diff'][idx] = ma - mb
-
-        # Ban targeting
-        bta = champ_tracker.get_ban_target_count(ta, bb)
-        btb = champ_tracker.get_ban_target_count(tb, ba)
-        cf['ban_target_a'][idx] = bta
-        cf['ban_target_b'][idx] = btb
-        cf['ban_target_diff'][idx] = bta - btb
+        cf['ban_target_a'][idx] = fa['ban_target']
+        cf['ban_target_b'][idx] = fb['ban_target']
+        cf['ban_target_diff'][idx] = fa['ban_target'] - fb['ban_target']
 
         if (idx + 1) % 10000 == 0:
             print(f"  Processed {idx + 1} games...")
@@ -473,7 +452,7 @@ def add_champion_meta_features(v3_df, champ_tracker, gameid_drafts):
     # Single concat instead of per-column inserts (see add_patch_meta_features):
     # avoids DataFrame fragmentation; values and column order are identical.
     v3_df = pd.concat([v3_df, pd.DataFrame(cf, index=v3_df.index)], axis=1)
-    print(f"Added {len(cf)} champion meta features (matched {matched}/{len(v3_df)} drafts)")
+    print(f"Added {len(cf)} champion meta features (matched {matched}/{n} games)")
     return v3_df
 
 
@@ -567,8 +546,10 @@ if __name__ == "__main__":
     print("V4 FEATURE ENGINEERING (Patch & Champion Meta)")
     print("="*60)
 
-    # Step 1: Build trackers + draft map (BEFORE loading v3_df)
-    patch_tracker, champ_tracker, gameid_drafts = build_all_from_raw(data_dir)
+    # Step 1: Collect games and build every game's features from earlier games only
+    games = collect_games_from_raw(data_dir)
+    game_feats = build_pre_game_features(games)
+    del games
     gc.collect()
 
     # Step 2: Load V3 features
@@ -579,13 +560,11 @@ if __name__ == "__main__":
     print(f"  Loaded {len(v3_df)} games")
 
     # Step 3: Add patch features
-    v3_df = add_patch_meta_features(v3_df, patch_tracker, gameid_drafts)
-    del patch_tracker
-    gc.collect()
+    v3_df = add_patch_meta_features(v3_df, game_feats)
 
     # Step 4: Add champion features
-    v3_df = add_champion_meta_features(v3_df, champ_tracker, gameid_drafts)
-    del champ_tracker, gameid_drafts
+    v3_df = add_champion_meta_features(v3_df, game_feats)
+    del game_feats
     gc.collect()
 
     # Step 5: Save
@@ -611,5 +590,3 @@ if __name__ == "__main__":
             mean_val = v3_df[col].mean()
             std_val = v3_df[col].std()
             print(f"  {col:40s}: mean={mean_val:8.4f}, std={std_val:8.4f}, non-null={non_null}")
-
-    print("\nDone!")

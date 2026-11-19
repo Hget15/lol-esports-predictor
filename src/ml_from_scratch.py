@@ -251,7 +251,7 @@ class DecisionTree:
         # GradientBoostedTrees, where `y` is a vector of pseudo-residuals rather
         # than 0/1 labels. Gini then acts as a heuristic split score on the
         # residual mean instead of a true variance-reduction criterion. It works
-        # well empirically (it's the criterion behind the reported V4 results),
+        # well empirically (it's the criterion behind the reported GBDT results),
         # but a purpose-built regression tree using variance reduction is the
         # more principled choice — that's addressed in the V5 rewrite.
         if len(y) == 0:
