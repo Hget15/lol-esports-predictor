@@ -18,13 +18,16 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      # The model libraries depend on NumPy only; the tests exercise the V5
-      # library end-to-end on synthetic data, so no dataset is required.
+      # The model libraries depend on NumPy only; the feature builder also
+      # needs pandas. Every test runs on synthetic data, so no dataset is required.
       - name: Install dependencies
-        run: python -m pip install --upgrade pip numpy
+        run: python -m pip install --upgrade pip numpy pandas
 
       - name: Run V5 unit tests (warnings are errors — nothing is suppressed)
         run: python -W error -m unittest tests.test_ml_v5 -v
+
+      - name: Feature look-ahead tests (a game's features must not depend on its own or later results)
+        run: python -W error -m unittest tests.test_no_lookahead -v
 
       - name: V4 and V5 library smoke tests
         run: |

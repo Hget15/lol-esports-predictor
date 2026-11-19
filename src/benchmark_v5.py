@@ -10,10 +10,10 @@ locally (see data/README.md to build one). It reports AUC / Brier / log-loss /
 accuracy / fit time per model for both libraries, the V5 GBDT's gain-based
 feature importances, an early-stopping demo, and a reproducibility check.
 
-What this is NOT: a re-run of the headline 51,088-game result in README.md.
-That needed the full 2021–2026 Oracle's Elixir data; if you only have one
-year locally the absolute numbers here will be lower and noisier. The point
-is the *relative* comparison and the timing.
+What this is NOT: the headline table in README.md. That comes from
+src/evaluate_versions.py, which trains on the first 75% of games; this script
+uses an 85/15 split, so its numbers sit slightly higher. The point here is the
+library-versus-library comparison and the timing.
 """
 import os
 import sys

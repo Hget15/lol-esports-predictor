@@ -6,136 +6,186 @@ no deep-learning frameworks. Every algorithm (logistic regression, gradient-boos
 random forest, a small MLP, and a stacking ensemble) is implemented by hand in
 [`src/ml_from_scratch.py`](src/ml_from_scratch.py).
 
-Trained on **51,088 games** from [Oracle's Elixir](https://oracleselixir.com) (2021–2026),
-the final model reaches **AUC 0.797 / 72.1% accuracy** on a held-out, time-ordered test set.
+Built on **58,842 games** from [Oracle's Elixir](https://oracleselixir.com) (2021 – November 2026).
+On 7,977 held-out games the best model reaches **AUC 0.722 / 66.2% accuracy**, against
+**62.7%** for an Elo rating alone.
 
-More than a modelling exercise, this is an attempt to answer a **game-design question with data**:
-*when two pro teams sit down, what actually decides the result?* The answer the model keeps
-returning is not raw team strength — it's **how quickly a team adapts to the current patch.**
+**Live demo:** https://hget15.github.io/lol-esports-predictor/ — pick any two pro teams and
+see the prediction with its reasoning.
 
-![What actually decides pro LoL matches — top V4 features](results/charts/v4_feature_importance.png)
+The question behind the project is a game-design one: *when two pro teams sit down, what
+actually decides the result?* The answer the data gives is unglamorous. **Team strength does
+most of the work, 130 engineered features add about three and a half points on top, and a
+third of games still go against the best available prediction.**
+
+![Test accuracy by feature version, against an Elo-only baseline](results/charts/accuracy_by_version.png)
 
 > Constraint that shaped the project: the build environment had no internet package access
 > (a proxy blocked `pip`), so every model had to be written from first principles in NumPy.
-> That turned into the most interesting part of the work.
+
+---
+
+## Correction: the original V4 result was wrong
+
+Earlier versions of this README reported **AUC 0.797 / 72.1% accuracy** for V4 and named
+"patch adaptation" as the dominant predictor. **Both claims were artifacts of look-ahead in
+the V4 features and have been withdrawn.**
+
+- **What happened.** `v4_enhancements.py` filled its patch and champion trackers with every
+  game in the dataset and only then computed each game's features. A team's "win rate on the
+  current patch" therefore included the game being predicted and games after it, and "recent
+  form" was the team's last ten games of the whole dataset.
+- **How it was found.** Checking why one feature (`patch_wr_delta_diff`) carried a quarter of
+  the model's importance. Recomputed correctly on one season, that feature's stand-alone AUC
+  fell from 0.776 to 0.559, and the model's from about 0.82 to about 0.70.
+- **The fix.** Games are now collected, sorted by date, and each game's features are read
+  *before* that game is recorded (`build_pre_game_features`). V1 and V2 already worked this
+  way.
+- **The guard.** [`tests/test_no_lookahead.py`](tests/test_no_lookahead.py) asserts that
+  changing a game's result, or any later result, leaves that game's features unchanged.
+- **Every number below** comes from one script, [`src/evaluate_versions.py`](src/evaluate_versions.py),
+  which puts all four feature versions through the same games and the same split.
+
+One smaller look-ahead remains and is left as is: V3's coach tenure and regional playstyle
+averages are counted over the whole dataset. Neither uses match results.
 
 ---
 
 ## Hypothesis
 
 > Professional match outcomes can be predicted meaningfully better than a naive
-> team-strength baseline (Elo + recent win rate) by engineering features from historical
-> match data — and in particular, **contextual "meta" signal (patch maturity and champion
-> meta) carries predictive information beyond raw team strength.**
+> team-strength baseline (Elo) by engineering features from historical match data — and in
+> particular, contextual "meta" signal (patch and champion meta) carries predictive
+> information beyond raw team strength.
 
 Two sub-questions drove the four versions:
 
 1. Does adding **player-, coach-, and travel-level** context beat a team-only baseline?
-2. Does **patch/champion meta** context (how settled the current patch is, how comfortable
-   each team is on the current meta) add signal on top of that?
+2. Does **patch/champion meta** context add signal on top of that?
 
 ---
 
 ## What was tested
 
-The project evolved through four feature generations, each re-evaluated on the **same**
-time-ordered test split so improvements are directly comparable.
+Four feature generations, each evaluated on the **same** games and time-ordered split.
 
 | Version | Feature theme added | # features |
 |--------:|---------------------|:----------:|
-| **V1** | Baseline: Elo, rolling win rates, side, head-to-head, league tier, playoffs, Bo-format | 63 |
+| **V1** | Elo, rolling win rates and in-game stats, side, head-to-head, league tier, Bo-format | 59 |
 | **V2** | Per-player tracking: KDA, champion pools, hot streaks, series momentum, fearless-draft & sub detection | 79 |
 | **V3** | Coaches (Leaguepedia), travel / home advantage, regional playstyle profiles | 106 |
-| **V4** | **Patch meta** (patch maturity, patch-vs-recent WR delta) + **champion meta** (pick rate, champ WR, comfort, meta conformity, ban pressure) | 130 |
+| **V4** | Patch meta (patch maturity, patch-vs-recent win-rate delta) + champion meta (pick rate, champion win rate, comfort, meta conformity, ban pressure) | 130 |
 
-Five model families were implemented and compared: **Logistic Regression**,
-**Gradient-Boosted Trees**, **Random Forest**, a 2-hidden-layer **Neural Network**, and a
-**Stacking Ensemble** meta-learner.
+Models compared on every version: **Logistic Regression** and **Gradient-Boosted Trees**.
+The library also implements a Random Forest, a 2-hidden-layer Neural Network and a Stacking
+Ensemble (used in the per-version training scripts).
 
-### Methodology (guarding against leakage)
+### Methodology
 
-- **Temporal split**, ordered by date: 75% train / 10% validation / 15% test. No future
-  data ever informs a past prediction.
-- Every feature for a given game is computed using **only data available before that game**
-  (dynamic Elo with season decay, rolling 5/10/20-game windows, running meta counts).
-- Calibration is evaluated explicitly (Brier score + reliability curves), not just accuracy.
+- **Temporal split**, ordered by date: the first 75% of games train the model (39,881 games,
+  through May 2025), the last 15% test it (7,977 games, February – November 2026). The 10%
+  in between is a validation slice the headline run does not use.
+- Only games where both teams have at least five prior games are used (53,175 of 58,842).
+- Every feature for a game is computed from games that finished before it.
+- Standardisation is fitted on the training games only.
+- An **Elo-only baseline** (the pre-game Elo expectation, no model) is reported alongside.
 
 ---
 
 ## Results
 
-Final V4 model comparison on the held-out test set (`results/model_comparison.csv`):
+Test set: 7,977 games. From `results/model_comparison.csv`.
 
-| Model | AUC | Brier | Log Loss | Accuracy |
-|-------|:---:|:-----:|:--------:|:--------:|
-| Logistic Regression | 0.785 | 0.189 | 0.562 | 71.8% |
-| **Gradient-Boosted Trees** | **0.797** | **0.188** | 0.558 | **72.1%** |
-| Blend (LR + GBDT) | 0.795 | 0.185 | 0.548 | 72.3% |
+| Features | Model | AUC | Brier | Log loss | Accuracy |
+|----------|-------|:---:|:-----:|:--------:|:--------:|
+| Elo only | none | 0.678 | 0.228 | 0.647 | 62.7% |
+| V1 (59) | Logistic Regression | 0.710 | 0.218 | 0.628 | 65.5% |
+| V1 (59) | GBDT | 0.708 | 0.217 | 0.624 | 65.3% |
+| V2 (79) | Logistic Regression | 0.714 | 0.216 | 0.623 | 65.8% |
+| V2 (79) | GBDT | 0.714 | 0.215 | 0.619 | 64.9% |
+| V3 (106) | Logistic Regression | 0.717 | 0.215 | 0.619 | 65.8% |
+| V3 (106) | GBDT | 0.714 | 0.215 | 0.619 | 65.0% |
+| **V4 (130)** | **Logistic Regression** | **0.722** | **0.213** | **0.615** | **66.2%** |
+| V4 (130) | GBDT | 0.717 | 0.214 | 0.617 | 65.5% |
 
-Progression across versions (best model each generation, identical test split):
+How to read it:
 
-![Accuracy by version, V1 to V4](results/charts/v4_model_progression.png)
+- **Rolling team form on top of Elo is the one clear step**: 62.7% → 65.5%.
+- **Each later version adds a fraction of a point.** One standard error on accuracy here is
+  about half a point, so no single step from V1 to V4 is distinguishable from noise on its
+  own. Logistic-regression AUC does rise at every step (0.710 → 0.714 → 0.717 → 0.722).
+- **The plain linear model matches or beats the trees** on every version.
 
-| Version | Best model | AUC | Brier | Accuracy | Features |
-|---------|------------|:---:|:-----:|:--------:|:--------:|
-| V1 | LR | 0.688 | 0.223 | 63.5% | 63 |
-| V2 | Ensemble | 0.698 | 0.220 | 64.1% | 79 |
-| V3 | GBDT | 0.698 | 0.220 | 64.3% | 106 |
-| **V4** | **GBDT** | **0.797** | **0.188** | **72.1%** | 130 |
+How much each idea carries by itself (stand-alone AUC on the test set; 0.5 means nothing):
 
-**Most important features (V4 GBDT, `results/feature_importance.csv`):**
+| Feature | AUC alone |
+|---------|:---------:|
+| Elo rating gap | 0.678 |
+| Win-rate gap, last 10 games | 0.656 |
+| Coach's win rate with the team | 0.637 |
+| Roster experience (career pro games) | 0.631 |
+| Patch win rate vs. recent form | 0.566 |
+| Prior win rate of the champions drafted | 0.558 |
+| Travel / home advantage | 0.500 |
 
-| Feature | Importance | Meaning |
-|---------|:----------:|---------|
-| `patch_wr_delta_diff` | 25.3% | How much better/worse each team is doing on the *current* patch vs. its recent form |
-| `player_experience_diff` | 8.2% | Difference in accumulated pro games between rosters |
-| `team_patch_games_diff` | 8.0% | Reps each team has on the live patch |
-| `avg20_earned_gpm_diff` | 5.2% | 20-game rolling gold-per-minute differential |
+![Top features of the V4 tree model by share of splits](results/charts/top_features.png)
+
+### Worlds 2026 back-test
+
+Trained on every game before the event (52,147 games through 16 September 2026), tested on
+the 110 games Oracle's Elixir labels as Worlds 2026 (`results/model_comparison_WLDs_2026.csv`,
+per-game predictions in `results/predictions_WLDs_2026.csv`).
+
+| | Games picked correctly | AUC |
+|---|:---:|:---:|
+| Elo only | 50.0% | 0.562 |
+| V4 Logistic Regression | 56.4% | 0.626 |
+| V4 GBDT | 50.9% | 0.563 |
+
+The logistic regression's pre-series pick won 29 of 49 series. It favoured Gen.G in every
+series they played and gave them 71% in the final, which Bilibili Gaming won 3–1. It had
+also picked against Bilibili Gaming in their two series before the final.
 
 ---
 
 ## Conclusion
 
-- **Both hypotheses held.** Every layer of context improved the model, and the **patch/champion
-  meta features (V4) produced the single biggest jump** — AUC 0.698 → 0.797 and accuracy
-  64% → 72% — despite adding only 24 features on top of V3.
-- The standout signal is **`patch_wr_delta_diff`** (25% of GBDT importance): teams that are
-  over- or under-performing their baseline *on the current patch* are the strongest predictor
-  of the next result. This is intuitive — early-patch adaptation separates top teams — and it
-  is signal a pure Elo model cannot see.
-- **Calibration improved alongside discrimination** (Brier 0.223 → 0.188), so the model isn't
-  just ranking better, its probabilities are more trustworthy.
-- **Honest limitations:** on a tiny out-of-distribution tournament sample (First Stand 2026,
-  ~10 matched games) the edge disappears into noise — best-of series between evenly matched
-  elite teams are inherently low-signal, and no 51k-game model fixes a 10-game sample. See
-  `worklog.md` for the full write-up.
+- **The first sub-question gets a qualified yes.** Team form, player, coach and draft context
+  lift accuracy from 62.7% (Elo) to 66.2%, and calibration improves with it (Brier 0.228 →
+  0.213). Almost all of that comes from the first step, rolling team form.
+- **The second gets a no, as far as this data can tell.** Patch and champion-meta features
+  moved accuracy from 65.8% to 66.2%, inside the noise. The earlier "patch adaptation decides
+  matches" result was a bug, not a finding.
+- **The ceiling is low.** With 130 features the best model is wrong about one game in three,
+  and at Worlds it is barely ahead of a coin flip.
+- **Simple beat complex.** Logistic regression was at least as good as gradient-boosted trees
+  everywhere it was compared.
 
 ---
 
 ## What this says about League — a designer's lens
 
-I built this as a designer who wanted to *interrogate the game's systems with data*, not just
-chase an accuracy number. A few takeaways I find genuinely interesting for how competitive
-League is designed:
+I built this to interrogate the game's systems with data rather than to chase an accuracy
+number. What the corrected results support:
 
-- **The meta is a skill, not a backdrop.** The single most predictive signal — by a wide margin
-  — is how well a team is performing *on the current patch relative to its own recent form*
-  (25% of model importance, more than 3× the next feature). Patch churn isn't noise the best
-  teams ride out; **adapting to it faster is the competitive edge.** That reframes patch cadence
-  as a core design lever on competitive integrity, not just a balance-maintenance chore.
-- **Flexibility beats mastery, a little.** Champion-pool depth and meta-conformity features
-  carry real weight, while single-champion "comfort" carries less. The systems reward teams
-  that can move *with* the meta over one-tricks — a design outcome most balance teams want.
-- **The early game still writes the story.** Gold- and CS-differential-at-15 features remain
-  predictive across every version, a quiet vote of confidence in lane-phase design: the first
-  15 minutes still meaningfully shape outcomes even at the pro level.
-- **Parity at the very top is real — and probably healthy.** When I stress-tested the model on
-  a single elite tournament's finals, its edge collapsed toward a coin flip. Between the best
-  teams on a settled patch, the game is close to a toss-up — which is arguably exactly what you
-  want the ceiling of a competitive game to feel like.
+- **Pre-game, strength is nearly all there is to know.** A single Elo number gets 62.7%.
+  Everything else I could engineer — player form, coaches, travel, patch, draft — adds three
+  and a half points. Most of what decides a pro game is not visible in the teams' histories.
+- **A third of results defy the best prediction.** For a competitive game that is arguably
+  the outcome you want: the better team usually wins, but not reliably enough to make the
+  match a formality.
+- **Parity at the very top is real.** Among Worlds teams the model's edge almost vanishes,
+  and its favourite lost the final.
+- **Patch adaptation did not show up as a separate skill.** How a team is doing on the
+  current patch relative to its recent form is weakly predictive on its own (AUC 0.566) and
+  adds nothing measurable once ordinary form is known. If fast adapters exist, their edge is
+  already in their win rate.
+- **The draft carries a small signal.** The historical win rate of the champions a team
+  picks is weakly predictive by itself and is the second most-used feature in the tree model.
+- **Travel showed no effect at all** in how these features encode it (AUC 0.500).
 
-*(Every claim above traces to a specific engineered feature and its measured importance — see
-`results/feature_importance.csv` and the per-version notes in `worklog.md`.)*
+Feature importance here means how often the tree model split on a feature. It shows what
+the model used, not what causes wins.
 
 ---
 
@@ -144,33 +194,36 @@ League is designed:
 ```
 lol-esports-predictor/
 ├── README.md                     # you are here
-├── worklog.md                    # detailed development log (architecture, bugs, decisions)
+├── worklog.md                    # original development log (with a correction note)
 ├── .env.example                  # env-var template (Riot API key placeholder)
 ├── src/                          # all model + feature-engineering code (pure NumPy)
 │   ├── ml_from_scratch.py        #   ML library: LR, GBDT, RF, NN, stacking, metrics
 │   ├── ml_from_scratch_v5.py     #   V5: corrected + faster library (this branch)
-│   ├── benchmark_v5.py           #   V4-vs-V5 head-to-head on local data (this branch)
+│   ├── benchmark_v5.py           #   V4-vs-V5 library head-to-head (this branch)
 │   ├── feature_engineering.py    #   V1 features (baseline)
 │   ├── feature_engineering_v2.py #   V2 features
+│   ├── build_coaches.py          #   rebuilds data/coaches.tsv from Leaguepedia
 │   ├── v3_enhancements.py        #   V3 features (coaches, travel, playstyle)
 │   ├── v4_enhancements.py        #   V4 features (patch meta, champion meta)
-│   ├── train_and_evaluate.py     #   V1 training pipeline
-│   ├── train_and_evaluate_v2.py  #   V2 training pipeline
-│   ├── train_and_evaluate_v3.py  #   V3 training pipeline
-│   └── simulate_fst2026.py       #   First Stand 2026 tournament back-test
-├── app/                          # React prediction UIs (Elo+WR proxy + player H2H)
-│   ├── lol_predictor_v4.jsx      #   latest
-│   └── lol_predictor_v2.jsx
-├── models/                       # trained weights (NumPy .npz)
-│   ├── logistic_regression.npz
-│   └── model_params.npz          #   feature means/stds + names
-├── results/
-│   ├── model_comparison.csv      # V4 model metrics
-│   ├── feature_importance.csv    # top V4 GBDT features
-│   └── charts/{v2,v3}/           # ROC, calibration, feature-importance plots
+│   ├── evaluate_versions.py      #   all headline numbers: V1–V4, one split, Elo baseline
+│   ├── train_and_evaluate*.py    #   per-version training with charts (V1–V3)
+│   └── simulate_fst2026.py       #   First Stand 2026 tournament back-test (V3 features)
 ├── tests/
+│   ├── test_no_lookahead.py      # leakage tests for the V4 feature builder
 │   └── test_ml_v5.py             # 24 unit tests for the V5 library (this branch)
-├── V5_NOTES.md                   # what V5 fixed, how it was verified, local benchmark
+├── V5_NOTES.md                   # what V5 fixed, how it was verified, benchmark
+├── app/                          # live demo web app (Vite + React + Tailwind) → GitHub Pages
+│   ├── src/model.js              #   calibrated Elo + form proxy, H2H rule, URL state (pure functions)
+│   ├── src/App.jsx               #   render-only components
+│   ├── src/data/teams.json       #   50 teams, rosters as of Mar 2026
+│   └── legacy/                   #   the original single-file components (their header text predates the correction)
+├── models/                       # V4 logistic-regression weights + scaler (NumPy .npz)
+├── results/
+│   ├── model_comparison.csv            # the results table above
+│   ├── feature_importance.csv          # top V4 GBDT features
+│   ├── model_comparison_WLDs_2026.csv  # Worlds 2026 back-test
+│   ├── predictions_WLDs_2026.csv       # per-game Worlds predictions
+│   └── charts/                         # README charts; v2/ and v3/ hold plots from the original runs
 └── data/                         # (gitignored) raw Oracle's Elixir CSVs — see data/README.md
 ```
 
@@ -178,21 +231,32 @@ lol-esports-predictor/
 
 ## Running it
 
-Requires Python 3.9+ with `numpy`, `pandas`, `matplotlib`, `seaborn`.
+Requires Python 3.9+ with `numpy` and `pandas` (`matplotlib` and `seaborn` only for the
+per-version training scripts). Run everything from the repository root.
 
 1. **Get the data** — follow [`data/README.md`](data/README.md) to download the Oracle's
    Elixir CSVs into `data/`.
-2. **Engineer features & train** (run from `src/`, scripts expect `data/` alongside):
+2. **Build features and evaluate:**
    ```bash
-   cd src
-   python v4_enhancements.py        # build the 130-feature dataset
-   python train_and_evaluate_v3.py  # or v2 — trains, evaluates, writes charts + weights
+   python src/feature_engineering.py       # V1 features
+   python src/feature_engineering_v2.py    # V2
+   python src/build_coaches.py             # coach file from Leaguepedia (slow: the API is rate-limited)
+   python src/v3_enhancements.py           # V3
+   python src/v4_enhancements.py           # V4
+   python src/evaluate_versions.py         # the results table (about 20 minutes; the trees are pure Python)
+   python src/evaluate_versions.py --holdout WLDs 2026 --versions V3 V4
    ```
-   The build environment was memory-constrained (~3.9 GB RAM), so the scripts read CSVs in
-   chunks and free memory aggressively — see `worklog.md` for the memory notes.
-3. **Prediction UI** — the `app/*.jsx` files are self-contained React components that use a
-   calibrated Elo+WR proxy formula (a faithful simplification of the full model) plus
-   per-position player head-to-head stats. Drop one into any React scaffold to run it.
+3. **Tests:**
+   ```bash
+   python -m unittest tests.test_no_lookahead -v
+   ```
+4. **Prediction UI** — the live demo is a small Vite app in `app/`:
+   ```bash
+   cd app && npm install && npm run dev
+   ```
+   `npm test` pins the demo's numbers (Gen.G vs T1 → 0.629). The demo uses a calibrated
+   Elo + win-rate formula rather than the full model, which needs a 130-feature vector per
+   game, plus per-role player head-to-head stats.
 
 ### Riot API key
 
@@ -202,33 +266,29 @@ solo-queue data enrichment; if you wire it up, copy `.env.example` to `.env` and
 
 ---
 
-## V5 — the corrected library (branch `v5`)
+## V5 — the rewritten library (branch `v5`)
 
-`main` keeps the V1–V4 code exactly as it produced the published numbers. This
-branch adds a from-scratch **rewrite of the model library that fixes every known
-limitation** documented in the V4 comments — without touching those results:
+This branch adds a from-scratch rewrite of the model library that fixes the limitations
+documented in the original library's comments:
 
-| Limitation in V4 | V5 fix |
+| Limitation in the V4 library | V5 fix |
 |---|---|
 | GBDT re-used a Gini *classification* tree on continuous residuals | One histogram-binned gradient tree optimising the exact second-order objective: variance-reduction mode for RF, Newton mode for GBDT |
 | Comment claimed "Newton-Raphson leaves"; code did first-order mean-residual leaves | True Newton leaves `−G/(H+λ)` with L2 leaf regularisation |
 | Python loop over 20 thresholds × full-array masks per feature per node | Vectorised `bincount`/`cumsum` histogram splits; binning shared by all trees; vectorised prediction |
 | Unseeded dropout masks and LR batch sampling | One seeded RNG drives everything — bit-for-bit reproducible |
-| Stacking mutated the caller's models; probability-space meta-features | Deep-copied per fold, genuinely out-of-fold, **logit-space** meta-learner (better calibrated) |
+| Stacking mutated the caller's models; probability-space meta-features | Deep-copied per fold, genuinely out-of-fold, logit-space meta-learner |
 | Split-count feature importance | Gain-weighted importance (split-count still available) |
 | NaN went left at fit time but right at predict time | Consistent "missing goes left" |
 
-Also new: validation-based early stopping (GBDT, NN), random-forest out-of-bag AUC,
-input validation, and no blanket warning suppression anywhere.
+On the corrected features (45,198 train / 7,977 test games) the V5 gradient-boosted trees
+train about **16× faster** than the original (394 s → 24 s) and score slightly better
+(AUC 0.721 vs 0.718); the other models tie. Details and caveats in
+[`V5_NOTES.md`](V5_NOTES.md).
 
 - Library: [`src/ml_from_scratch_v5.py`](src/ml_from_scratch_v5.py)
-- Tests (24, stdlib `unittest`, ~2 s): `python -m unittest tests.test_ml_v5 -v`
-- Head-to-head vs. the V4 library on local data: `python src/benchmark_v5.py` —
-  results and caveats in [`V5_NOTES.md`](V5_NOTES.md)
-
-The V5 library has **not** been re-benchmarked on the full 51,088-game dataset (only
-the 2026 file is available locally), so the headline numbers above remain those of
-the V4 code on `main`.
+- Tests: `python -m unittest tests.test_ml_v5 tests.test_no_lookahead -v`
+- Benchmark: `python src/benchmark_v5.py`
 
 ---
 
@@ -236,7 +296,8 @@ the V4 code on `main`.
 
 - Match data © [Oracle's Elixir](https://oracleselixir.com) (Tim Sevenhuysen). Please credit
   the source and follow their terms.
-- Coach data scraped from the Leaguepedia Cargo API.
+- Coach data from [Leaguepedia](https://lol.fandom.com) (CC BY-SA 3.0), rebuilt by
+  `src/build_coaches.py`. It covers 86% of team-games; the coach file used for the original
+  runs was not kept, so V3 numbers here are not a reproduction of those runs.
 - All ML implemented from scratch in NumPy as a deliberate exercise — see
-  [`worklog.md`](worklog.md) for the full engineering narrative, including the bugs and
-  memory-optimization work behind each version.
+  [`worklog.md`](worklog.md) for the engineering narrative behind each version.

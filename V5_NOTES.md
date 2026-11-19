@@ -1,11 +1,16 @@
 # V5 — the corrected model library
 
-`main` keeps the V1–V4 code exactly as it produced the published results (AUC 0.797 on
-51,088 games). This branch is where the limitations documented in that code's comments
-are actually fixed, and where I try to push the library further. Nothing here changes
-the numbers in the main README.
+`main` holds the V1–V4 feature pipeline and the original model library. This branch adds a
+rewrite of the model library that fixes the limitations documented in the original's
+comments, with tests and a like-for-like benchmark.
 
-## What was wrong in V4, and what V5 does instead
+> **Correction, November 2026.** An earlier version of these notes benchmarked the two
+> libraries on V4 features that contained look-ahead (see the main README), and reported
+> that the "patch adaptation" finding replicated. It did not: that finding was an artifact
+> of the same bug. The benchmark below was rerun on the corrected features and the full
+> dataset.
+
+## What was wrong in the V4 library, and what V5 does instead
 
 | # | V4 limitation | V5 |
 |---|---|---|
@@ -31,49 +36,45 @@ explain the *why* on every component.
   synthetic problem, that early stopping keeps the best iteration, OOB scoring, bit-for-bit
   reproducibility of every model (including dropout), that different seeds differ, and that
   stacking never mutates its templates.
-- **CI:** `.github/workflows/tests.yml` runs the suite plus both libraries' smoke tests on
-  Python 3.10 and 3.12 with warnings-as-errors on every push / PR.
+- **CI:** `.github/workflows/tests.yml` runs the suite, the feature look-ahead tests and both
+  libraries' smoke tests on Python 3.10 and 3.12 with warnings-as-errors on every push / PR.
 - **Head-to-head benchmark** against the V4 library on the same data and split (below).
 
-## Local benchmark: V4 library vs V5 library
+## Benchmark: V4 library vs V5 library
 
-`python src/benchmark_v5.py` on `data/engineered_features_v4.csv` built from the **2026
-season only** (the sole raw file available locally): 1,355 games after the ≥5-games filter,
-130 V4 features, temporal 85/15 split → **1,151 train / 204 test**, matched hyper-parameters.
+`python src/benchmark_v5.py` on the corrected `data/engineered_features_v4.csv`: 53,175
+games with at least five prior games per team, 130 features, time-ordered 85/15 split →
+**45,198 train / 7,977 test**, matched hyper-parameters.
 
 | Model | Lib | AUC | Brier | LogLoss | Acc | Fit (s) |
 |---|---|---:|---:|---:|---:|---:|
-| Logistic Regression | V4 | 0.8000 | 0.1835 | 0.5787 | 0.740 | 0.2 |
-| Logistic Regression | **V5** | **0.8228** | **0.1728** | **0.5207** | 0.735 | 0.0 |
-| GBDT | V4 | **0.8401** | 0.1718 | 0.5230 | 0.755 | 61.9 |
-| GBDT | **V5** | 0.8317 | **0.1670** | **0.4997** | 0.755 | **5.5** |
-| Random Forest | V4 | **0.8217** | **0.1806** | **0.5419** | 0.760 | 10.9 |
-| Random Forest | **V5** | 0.8124 | 0.1845 | 0.5515 | 0.745 | **2.0** |
-| Neural Network | V4 | 0.7403 | 0.2411 | 1.0671 | 0.706 | 1.5 |
-| Neural Network | **V5** | 0.7345 | 0.2473 | 1.1329 | 0.696 | 1.0 |
+| Logistic Regression | V4 | 0.7252 | 0.2114 | 0.6104 | 0.666 | 2.2 |
+| Logistic Regression | **V5** | 0.7258 | 0.2110 | 0.6094 | 0.666 | 0.8 |
+| GBDT | V4 | 0.7177 | 0.2141 | 0.6169 | 0.654 | 394.3 |
+| GBDT | **V5** | **0.7212** | **0.2123** | **0.6118** | **0.660** | **24.4** |
+| Random Forest | V4 | 0.7138 | 0.2148 | 0.6179 | 0.655 | 102.8 |
+| Random Forest | **V5** | 0.7140 | 0.2148 | 0.6181 | 0.658 | **12.5** |
+| Neural Network | V4 | 0.7095 | 0.2185 | 0.6278 | 0.650 | 55.3 |
+| Neural Network | **V5** | 0.7086 | 0.2189 | 0.6302 | 0.650 | 46.1 |
 
-**V5 GBDT with validation early stopping** (a feature V4 does not have): stopped at 121 of a
-500-tree cap → **AUC 0.8397, Brier 0.1643** (best Brier in the table), 6.6 s.
+**V5 GBDT with validation early stopping** (which V4 does not have): stopped at 118 of a
+500-tree cap → AUC 0.7208, Brier 0.2122, 29 s.
 
-`patch_wr_delta_diff` is again the top feature (19.0% gain-weighted importance) — the
-project's headline finding reproduces on a different season with a different tree
-implementation.
+Top V5 GBDT features by gain: composite team strength 18.8%, Elo gap 11.9%, 20-game gold
+per minute 10.0%, roster experience 7.4%. No patch feature is in the top ten.
 
-### How to read this honestly
+### How to read this
 
-- **Calibration improved.** V5 is better on Brier and log-loss for LR and GBDT, i.e. its
-  probabilities are more trustworthy, which is what Newton leaves + regularisation are for.
-- **Speed improved a lot.** GBDT trains **~11× faster**, RF ~5×, with no change in accuracy —
-  the vectorised histogram splits doing exactly what they were meant to.
-- **AUC is a statistical tie.** With only 204 test games the standard error of an AUC around
-  0.83 is roughly ±0.03. V4's nominal +0.01 on GBDT/RF and V5's +0.02 on LR are both inside
-  that; neither library "wins" on ranking here. With early stopping V5 lands on V4's best AUC
-  anyway, at the best calibration of all.
-- **Neither NN is good on this much data** (1,151 rows, 130 features → both overfit). That
-  matches the original project's finding that tree models dominate on this problem.
-- **This is not the headline number.** The README's 0.797 AUC came from 51,088 games across
-  2021–2026; a single season is smaller, noisier and — as the higher absolute AUCs show — an
-  easier slice. The value of this benchmark is the *relative* comparison and the timing.
+- **Speed is the clear win.** GBDT trains about **16× faster** (394 s → 24 s) and the random
+  forest about 8×, from the vectorised histogram splits.
+- **GBDT is slightly better on every metric** (AUC +0.0035, Brier and log-loss lower). With
+  7,977 test games the standard error of an AUC near 0.72 is about 0.006, so this is a
+  consistent small edge, not a decisive one.
+- **Logistic regression, random forest and the neural network are ties**, as they should be:
+  V5 changes how they are implemented, not what they compute.
+- **Logistic regression is still the best model on this data** in either library.
+- These numbers use an 85/15 split, so they sit a little above the main README's table,
+  which trains on the first 75% of games.
 
 ## Running it
 
@@ -86,11 +87,11 @@ python src/benchmark_v5.py [features.csv]      # V4-vs-V5 head-to-head on your l
 The benchmark needs an engineered-feature CSV; see `data/README.md` for building one from
 the Oracle's Elixir download.
 
-## What I'd do next with the full dataset
+## What I'd do next
 
-1. Re-run the V4 training pipeline with the V5 library swapped in, to get a like-for-like
-   51k-game number and a proper walk-forward CV spread rather than one split.
+1. Swap the V5 library into `src/evaluate_versions.py` so the headline table runs in a
+   couple of minutes instead of twenty.
 2. Tune V5's new knobs (`reg_lambda`, `colsample`, `n_bins`, early-stopping patience) on the
    validation slice — everything above uses V4's hyper-parameters unchanged.
-3. Use gain-based importance to prune the 130 features; the V4 notes suspected redundancy
-   among the `_a` / `_b` / `_diff` triples.
+3. Use gain-based importance to prune the 130 features; many are `_a` / `_b` / `_diff`
+   triples of the same quantity.
